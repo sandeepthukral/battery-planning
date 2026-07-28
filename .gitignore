@@ -1,0 +1,10 @@
+.venv/
+price_cache/
+results/
+entsoe-output*.txt
+entsoe*.xml
+__pycache__/
+.DS_Store
+
+# Household load/solar export - private, not for publication
+backtest_input_hourly.csv

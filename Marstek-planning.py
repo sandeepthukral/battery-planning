@@ -68,6 +68,8 @@ import copy
 import json
 import time, math
 import sys
+import os
+import csv
 import urllib.parse
 import pulp
 import paho.mqtt.client as mqtt
@@ -219,24 +221,32 @@ def mqtt_send_receive(message,expected_response):
 
 ##### Start of input data collection functions
 
+def _ask(envname, prompt, default):
+    # env var wins (for non-interactive batch runs); else prompt; else default
+    v = os.environ.get(envname)
+    if v is not None and v != "":
+        return v
+    return input(prompt) or default
+
 def getUserInput():
     # get user input, with limited (!!) input validation, only used in standalone mode
+    # every prompt can be pre-set via an environment variable for scripted batch runs
     global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts,MACaddress
-    startdate=input("Enter startdate as YYYYMMDD (default=today)   : ") or todayString
-    enddate=input("Enter enddate as YYYYMMDD (default=startdate+1) : ") or datetime.strftime(datetime.strptime(startdate,'%Y%m%d')+timedelta(days=1),'%Y%m%d')
-    starthour=int(input("Enter start hour as HH (default next hour)   : ") or datetime.strftime(datetime.now()+timedelta(hours=1),'%H'))
-    initialCharge=int(input("Enter initial charge in Wh (default=0) :") or "0" )
-    ratedBatteryCapacity=int(input("Enter rated capacity in Wh (default 2100) :") or 2100)
-    minBatterySOCPct=int(input("Enter minimum SOC in percent (default 12) :") or 12)
-    maxChargeSpeed=int(input("Enter max charge speed in Watt (default 1200) :") or 1200)
-    maxDischargeSpeed=int(input("Enter max discharge speed in Watt (default 800) :") or 800)
-    RTE=int(input("Enter conversion efficiency percentage RTE (default 85) :") or 85)
+    startdate=_ask("BT_START","Enter startdate as YYYYMMDD (default=today)   : ",todayString)
+    enddate=_ask("BT_END","Enter enddate as YYYYMMDD (default=startdate+1) : ",datetime.strftime(datetime.strptime(startdate,'%Y%m%d')+timedelta(days=1),'%Y%m%d'))
+    starthour=int(_ask("BT_STARTHOUR","Enter start hour as HH (default next hour)   : ",datetime.strftime(datetime.now()+timedelta(hours=1),'%H')))
+    initialCharge=int(_ask("BT_INITCHARGE","Enter initial charge in Wh (default=0) :","0"))
+    ratedBatteryCapacity=int(_ask("BT_CAP","Enter rated capacity in Wh (default 2100) :",2100))
+    minBatterySOCPct=int(_ask("BT_MINSOC","Enter minimum SOC in percent (default 12) :",12))
+    maxChargeSpeed=int(_ask("BT_MAXCHG","Enter max charge speed in Watt (default 1200) :",1200))
+    maxDischargeSpeed=int(_ask("BT_MAXDIS","Enter max discharge speed in Watt (default 800) :",800))
+    RTE=int(_ask("BT_RTE","Enter conversion efficiency percentage RTE (default 85) :",85))
     onewayEff=float((100-(100-RTE)/2)/100)
     entsoeToken='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'  # paste in your own security token from entsoe.eu
     MACaddress="xxxxxxxxxxxxxxxxxx" # paste the MAC address of your battery system here.
-    energyTax=float(input("Enter energy tax in Euro per kWh (default 0.11085) :") or 0.11085) # energy tax , incl btw, Euro per kWh
+    energyTax=float(_ask("BT_ETAX","Enter energy tax in Euro per kWh (default 0.11085) :",0.11085)) # energy tax , incl btw, Euro per kWh
     supplierCosts=0.01682  # supplier/purchasing costs per kWh incl btw
-    cycleCosts=0.052 # Example for ( 600 euro/6000 cycles) / (2 * 2.1 kWh * 88% Depth of Discharge)
+    cycleCosts=float(os.environ.get("BT_CYCLECOSTS","0.052")) # Example for ( 600 euro/6000 cycles) / (2 * 2.1 kWh * 88% Depth of Discharge)
     vatPCT=1.21  # VAT/BTW 21%
     networkCosts=0 # network costs per kWh, future development
 
@@ -614,39 +624,55 @@ def setBatteryAction(action,scheduleDateTime,power,schedule):
 
     return responseResult
 
-def getHrValueFromBIGDB(runDate,device):
-    # query the historic dbase with hourly values specifically created to re-run the past
-    selectStart=datetime.strftime(runDate,'%Y-%m-%d 00:00:00')
-    selectEnd=datetime.strftime(runDate+timedelta(days=2),'%Y-%m-%d 01:00:00')  # the extra hour is needed to get the start value of that hour
-    db_file = r"/home/pi/dombigdb/domoticzbig.db"
-    conn = None
-    try:
-        conn = sqlite3.connect(db_file)
-    except Error as e:
-        print(e)
-    cur = conn.cursor()
-    # the following select statement determines which devices to include.
-    cur.execute("SELECT substr(date,1,13) hour,min(value) FROM meter WHERE DeviceRowID=? and date>=? and date<? group by hour order by hour",(device,selectStart,selectEnd,))
-    rows = cur.fetchall()
+_BACKTEST_CSV = os.environ.get("BACKTEST_CSV", "backtest_input_hourly.csv")
+_backtest_cache = None
 
-    seqnr=1
-    hourValue=0
-    hourValueList=[]
-    firstRecord=True
-    for row in rows:
-        if firstRecord:
-            actDate=row[0][0:10]
-            actHour=row[0][11:13]
-            startValue=row[1]
-            firstRecord=False
-        else:
-            hourValue=row[1]-startValue
-            hourValueList.append([seqnr,actDate,actHour,hourValue])
-            actDate=row[0][0:10]
-            actHour=row[0][11:13]
-            seqnr+=1
-            startValue=row[1]
-    cur.close()
+def _load_backtest_csv():
+    # load the AlphaESS backtest CSV once into a dict keyed by "YYYY-MM-DD HH"
+    # CSV columns: datetime (YYYY-MM-DD HH:00:00), load_kwh, solar_kwh
+    # values are already per-hour deltas in kWh -> converted to Wh here (gotcha #1)
+    global _backtest_cache
+    if _backtest_cache is None:
+        _backtest_cache = {}
+        with open(_BACKTEST_CSV) as f:
+            r = csv.DictReader(f)
+            for row in r:
+                ts = row["datetime"]                       # "YYYY-MM-DD HH:00:00"
+                key = ts[0:10] + " " + ts[11:13]           # "YYYY-MM-DD HH"
+                load_wh  = float(row["load_kwh"])  * 1000.0 # kWh -> Wh
+                solar_wh = float(row["solar_kwh"]) * 1000.0 # kWh -> Wh
+                _backtest_cache[key] = (load_wh, solar_wh)
+    return _backtest_cache
+
+def getHrValueFromBIGDB(runDate,device):
+    # CSV-backed replacement for the historic SQLite query, used to re-run the past.
+    # device 3   = all PV, returned as the single house/indirect group (AC-coupled QS1 array)
+    # device 210 = direct-coupled PV group -> none (we are NOT DC-coupled)
+    # device 22  = home usage / load
+    # Values are returned directly (NO diffing) as per-hour Wh (gotcha #2).
+    data = _load_backtest_csv()
+    hourValueList = []
+    seqnr = 1
+    d = runDate
+    end = runDate + timedelta(days=2)
+    while d < end:
+        ds = d.strftime("%Y-%m-%d")
+        for h in range(24):
+            key = "%s %02d" % (ds, h)
+            if key not in data:
+                continue
+            load_wh, solar_wh = data[key]
+            if device == 3:
+                val = solar_wh          # all AC-coupled PV as house/indirect
+            elif device == 210:
+                val = 0.0               # no direct-coupled group
+            elif device == 22:
+                val = load_wh           # consumption
+            else:
+                val = 0.0
+            hourValueList.append([seqnr, ds, "%02d" % h, int(round(val))])
+            seqnr += 1
+        d = d + timedelta(days=1)
     return hourValueList
 
 def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
@@ -683,6 +709,9 @@ def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
 
 def loadPricesIntoFile(entsoeFileName,loadStartDate,loadEndDate):
     # request the prices from entsoe.eu and store in a file
+    if entsoeToken.startswith("x"):
+        # placeholder token: skip ENTSOE entirely, let the EnergyZero fallback handle it
+        return False
     try:
         # url components for https feed from ENTSOE.EU
         urlwebsite='https://web-api.tp.entsoe.eu/api?'
@@ -756,7 +785,9 @@ def parsePricesIntoList(runDate,hourAverage=False,local_tz="Europe/Amsterdam"):
 
     if xmlAvailable[0]!="Y" and xmlAvailable[0]!="y":
         if not loadPricesIntoFile(entsoeFileName,loadStartDate,loadEndDate):
-            print("ERROR: Something wrong with getting price data")
+            # placeholder ENTSOE token: expected, EnergyZero fallback will supply prices
+            if not entsoeToken.startswith("x"):
+                print("ERROR: Something wrong with getting price data")
             return priceList
 
     ns = {"ns": "urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3"}
@@ -876,9 +907,27 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
     else:
         url = "https://public.api.energyzero.nl/public/v1/prices?date="+loadStartDate+"&interval=INTERVAL_QUARTER&energyType=ENERGY_TYPE_ELECTRICITY"
 
-    response=requests.get(url)
-    if response.status_code == 200:
-        basePrices=json.loads(response.text)
+    # cache raw EnergyZero JSON per date+interval so repeated backtest runs don't refetch
+    cacheDir=os.environ.get("BT_PRICE_CACHE","price_cache")
+    cacheKey=loadStartDate.replace("-","")+("_h" if (hourAvgPlanning or runDate<datetime.strptime("20251001","%Y%m%d")) else "_q")
+    cacheFile=os.path.join(cacheDir,cacheKey+".json")
+    responseText=None
+    if os.path.exists(cacheFile):
+        with open(cacheFile) as cf:
+            responseText=cf.read()
+    else:
+        response=requests.get(url)
+        if response.status_code == 200:
+            responseText=response.text
+            try:
+                os.makedirs(cacheDir,exist_ok=True)
+                with open(cacheFile,"w") as cf:
+                    cf.write(responseText)
+            except Exception:
+                pass
+
+    if responseText is not None:
+        basePrices=json.loads(responseText)
         period_counter=1
         for entry in basePrices.get("base", []):
             # Parse UTC timestamp
@@ -1395,8 +1444,8 @@ def main():
         overwrite="Y"
     else:
         getUserInput()
-        xmlAvailable=input("Is the xml-data already available in the file(s) Y/N ? (default N) ") or "N"
-        overwrite=input("Overwrite previous output file(s) Y/N ? (default Y) ") or "Y"
+        xmlAvailable=_ask("BT_XMLAVAIL","Is the xml-data already available in the file(s) Y/N ? (default N) ","N")
+        overwrite=_ask("BT_OVERWRITE","Overwrite previous output file(s) Y/N ? (default Y) ","Y")
     if overwrite=="Y" or overwrite=="y":
         writeMode='w'
     else:
