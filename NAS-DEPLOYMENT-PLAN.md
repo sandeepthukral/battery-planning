@@ -234,6 +234,85 @@ the forecast.solar rate-limit budget starts clean.
 
 ---
 
+## 2b. Irreplaceable data
+
+Not a deployment step, but it belongs here because the NAS is where the second copy should
+land, and because the move is the moment it is easy to do.
+
+Household data is deliberately **not** in this repo: it is a fork of a public upstream, so
+anything committed is world-readable, and a year of hourly load is occupancy data — it shows
+when the house is empty and which weeks we were away. That decision is right, and it has a
+consequence: git is not the backup.
+
+Everything the project depends on is regenerable **except one file**:
+
+| data | size | if lost |
+|---|---|---|
+| **`backtest_input_hourly.csv`** | 292 KB | **Gone permanently** |
+| `backtest_input_hourly_clean.csv` + sidecar | 300 KB | `python3 clean_backtest_csv.py` |
+| `results-raw-baseline/`, `results/` | 26 MB | one `./run-matrix.sh` |
+| `price_cache/` | 30 MB | re-fetchable from EnergyZero (~522 calls) |
+| Sparky P1 export | 115 MB | re-exportable from Sparky while the account lives |
+| `pv_cache/` | 16 KB | worthless, 48 h retention |
+
+The APsystems EMA export covers **2025-07-01 → 2026-06-30**. InfluxDB history starts
+**2026-07-17** — seventeen days *after* it ends, so there is **no overlap** and Influx cannot
+regenerate any of it. The collector was not running. Every financial conclusion this project
+has produced traces back to that 292 KB.
+
+### What the P1 data changes
+
+```
+EMA CSV      2025-07-01 ─────────────────────────► 2026-06-30
+P1                        2026-01-22 ───────────────────► 2026-07-24
+InfluxDB                                            2026-07-17 ──────► now
+```
+
+`p1_to_backtest_csv.py` turns the Sparky export into the same `datetime,load_kwh,solar_kwh`
+format via `load = solar + delivery − return`. This gives:
+
+- a **second, independent measurement** of 2026-01-22 → 06-30, so that stretch is no longer
+  single-copy;
+- coverage of **2026-07-01 → 07-16**, the gap between the EMA export ending and InfluxDB
+  starting (Phase 6 in the main plan) — pending an hourly solar series for those days, since
+  P1 sees only the net at the meter.
+
+**It is truncated at 2026-07-16** (`--until`, the default). The identity holds only while
+nothing but the house is on the connection. Once the battery runs,
+`load = solar + delivery − return + discharge − charge` and P1 alone cannot separate the
+terms. Data past that date is not noisier, it is wrong.
+
+Agreement with the EMA export on monthly energy is **1.3–1.9%** once the one-sided exclusion
+of impossible negative hours is adjusted for — two independent measurement chains, a utility
+meter and the AlphaESS CT. The tool prints this table on every run rather than hiding it. The
+unadjusted column runs ~3% high because EMA misplaces solar in time without losing it, so its
+low hours surface as negative loads and get dropped while the high hours stay.
+
+**Still single-copy: 2025-07-01 → 2026-01-21.** Roughly 6.5 months including a full winter —
+the season the reserve logic leans on hardest. P1 does not reach back that far.
+
+### Where the copies live
+
+Moved out of `~/Downloads` (a folder people empty, often excluded from backups) to
+`/Users/sandeep/Personal/battery-data/`:
+
+```
+backtest_input_hourly.csv                     the irreplaceable year
+backtest_input_hourly_clean.excluded.json     which days were excluded and why
+sparky-export-20260724/                       full Sparky export, 115 MB
+```
+
+The Sparky export carries the meter EAN, the meter number and the service address. It must
+never enter the repo — hence the absolute path default in `p1_to_backtest_csv.py`, overridable
+with `P1_CSV`.
+
+**To do at deployment:** copy `battery-data/` to the NAS alongside `price_cache/`. Once
+plans and actuals are landing in InfluxDB (step 4) the collector becomes the durable record
+and this only guards the pre-2026-07-17 past — but that past is the part that cannot be
+re-measured by waiting.
+
+---
+
 ## 3. Scheduling on DSM
 
 New `scripts/plan.sh` in this repo, modelled on

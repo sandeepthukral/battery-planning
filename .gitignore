@@ -16,6 +16,8 @@ backtest_input_hourly.csv
 backtest_input_hourly_clean.csv
 backtest_input_hourly_clean.excluded.json
 backtest_influx_*.csv
+backtest_p1_*.csv
+backtest_p1_*.excluded.json
 
 # Backtest run outputs - the "use" column is the same household load data
 results-raw-baseline/
@@ -25,3 +27,6 @@ plans/
 logs/
 pv_cache/
 solarforecast.json
+
+# scratch PR text, not part of the project
+PR-DESCRIPTION.md
