@@ -49,11 +49,16 @@ log=logs/plan_${today}_${hour}.log
 # block is also where the 10 kW inverter / three-phase upgrade gets made. BT_CAP, BT_MAXCHG,
 # BT_MAXDIS, BT_CYCLECOSTS and BT_GRIDMAX still override here for a one-off what-if:
 #   BT_GRIDMAX=5750 ./plan-now.sh     # what the 3x25A single-phase connection would do
+#
+# stdin from /dev/null is load-bearing, not tidiness. Any variable not set above falls back
+# to the constants in Marstek-planning.py, and _ask() only takes that path when there is no
+# terminal. Run from a shell, stdout goes to the log but stdin is still the terminal, so it
+# would prompt into the log file and wait forever for an answer nobody can see.
 BT_START=$today BT_END=$tomorrow BT_STARTHOUR=$hour \
 BT_INITCHARGE=influx BT_MINSOC=10 BT_RTE=90 \
 BT_ETAX=$etax \
 BT_XMLAVAIL=N BT_OVERWRITE=Y BT_PRICE_CACHE=price_cache \
-  $PY Marstek-planning.py -s -p -u -b >> $log 2>&1
+  $PY Marstek-planning.py -s -p -u -b < /dev/null >> $log 2>&1
 rc=$?
 
 if [[ $rc -ne 0 ]]; then

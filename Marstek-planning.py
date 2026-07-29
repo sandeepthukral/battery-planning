@@ -416,6 +416,19 @@ def _ask(envname, prompt, default):
     v = os.environ.get(envname)
     if v is not None and v != "":
         return v
+    if v == "":
+        # Set but empty means something upstream failed to produce a value rather than
+        # choosing to omit it - the Linux "date -v+1d" case, which yields an empty BT_END
+        # instead of an error. Say so; silently substituting a default here would hide a
+        # broken caller behind a plan that looks fine.
+        print("WARNING: %s is set but empty; using the default (%s)"%(envname,default))
+        return default
+    if not sys.stdin.isatty():
+        # No terminal means a scheduled run: cron, a container, or output redirected to a
+        # log. input() there raises EOFError at best and blocks forever at worst. Taking
+        # the default is what makes the constants at the top of this file the single source
+        # of truth for unattended runs, so plan-now.sh can set no hardware variables at all.
+        return default
     return input(prompt) or default
 
 def getUserInput():
