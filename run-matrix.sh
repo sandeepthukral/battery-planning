@@ -3,8 +3,16 @@
 # Sums the final "cost" column (positive = earning). Battery value = sum(battery) - sum(baseline).
 cd "$(dirname "$0")"
 PY=.venv/bin/python
+# Uses the repaired CSV (see clean_backtest_csv.py): catch-up spikes redistributed and
+# zero-load days excluded. Regenerate with: python3 clean_backtest_csv.py
+export BACKTEST_CSV=backtest_input_hourly_clean.csv
+# BT_CYCLECOSTS: 6800 EUR all-in / (6000 cycles x 27.9 kWh x 90% DoD) = 0.0451 EUR per kWh
+# discharged. The inherited default of 0.052 was derived for a 2.1 kWh Marstek and is wrong
+# for this system; assumes a 6000-cycle warranty and charges the whole install against
+# throughput, so it errs high.
 export BT_START=20250701 BT_END=20260630 BT_STARTHOUR=0 BT_INITCHARGE=0 \
-       BT_MINSOC=10 BT_RTE=90 BT_ETAX=0.1228 BT_XMLAVAIL=N BT_OVERWRITE=Y BT_PRICE_CACHE=price_cache
+       BT_MINSOC=10 BT_RTE=90 BT_ETAX=0.1228 BT_XMLAVAIL=N BT_OVERWRITE=Y BT_PRICE_CACHE=price_cache \
+       BT_CYCLECOSTS=0.0451
 mkdir -p results
 : > results/summary.tsv
 print "power_kW\tsaldering\tbattery\tsum_cost_eur\trows" >> results/summary.tsv
@@ -12,11 +20,22 @@ print "power_kW\tsaldering\tbattery\tsum_cost_eur\trows" >> results/summary.tsv
 for power in 5000 10000; do
   for sald in off on; do
     for cap in 27900 1; do
-      [[ $sald == on ]] && nflag="-n" || nflag=""
+      # force the regime explicitly: every date in this matrix predates salderingEndDate,
+      # so the planner's "auto" default would make both legs saldering-on
+      export BT_SALDERING=$sald
+      nflag=""
       [[ $cap == 27900 ]] && btag="batt" || btag="base"
       ptag=$((power/1000))kw
       tag=${ptag}_${sald}_${btag}
-      export BT_CAP=$cap BT_MAXCHG=$power BT_MAXDIS=$power
+      # The installed 5 kW inverter does not reach its nameplate: measured over 11 days of
+      # 30s samples, discharge p99 is 4700 W (matching observation exactly) and charge p99
+      # 4840 W. Planning at 5000 W overstates what the hardware can do. The 10 kW row is a
+      # hypothetical upgrade, so it keeps its nameplate.
+      if [[ $power == 5000 ]]; then
+        export BT_CAP=$cap BT_MAXCHG=4850 BT_MAXDIS=4700
+      else
+        export BT_CAP=$cap BT_MAXCHG=$power BT_MAXDIS=$power
+      fi
       $PY Marstek-planning.py -s -p -u -b -h $nflag > results/_run_${tag}.log 2>&1
       mv entsoe-output20250701.txt results/out_${tag}.txt
       line=$(LC_NUMERIC=C awk -v p=$((power/1000)) -v s=$sald -v b=$btag \
