@@ -244,7 +244,7 @@ anything committed is world-readable, and a year of hourly load is occupancy dat
 when the house is empty and which weeks we were away. That decision is right, and it has a
 consequence: git is not the backup.
 
-Everything the project depends on is regenerable **except one file**:
+Everything the project depends on is regenerable **except two things**:
 
 | data | size | if lost |
 |---|---|---|
@@ -252,13 +252,18 @@ Everything the project depends on is regenerable **except one file**:
 | `backtest_input_hourly_clean.csv` + sidecar | 300 KB | `python3 clean_backtest_csv.py` |
 | `results-raw-baseline/`, `results/` | 26 MB | one `./run-matrix.sh` |
 | `price_cache/` | 30 MB | re-fetchable from EnergyZero (~522 calls) |
-| Sparky P1 export | 115 MB | re-exportable from Sparky while the account lives |
+| **Sparky P1 export** | 115 MB | **Gone permanently** — no re-export will be done |
 | `pv_cache/` | 16 KB | worthless, 48 h retention |
 
 The APsystems EMA export covers **2025-07-01 → 2026-06-30**. InfluxDB history starts
 **2026-07-17** — seventeen days *after* it ends, so there is **no overlap** and Influx cannot
 regenerate any of it. The collector was not running. Every financial conclusion this project
 has produced traces back to that 292 KB.
+
+The Sparky export is the second one. It *was* re-downloadable, and an earlier version of this
+section said so; that is no longer true — the decision is that no further export will be taken
+from Sparky. So the 115 MB directory under `battery-data/` is the only copy of the P1 record,
+and the P1 half of the cross-validation dies with it. Treat it exactly like the EMA CSV.
 
 ### What the P1 data changes
 
@@ -310,6 +315,44 @@ with `P1_CSV`.
 plans and actuals are landing in InfluxDB (step 4) the collector becomes the durable record
 and this only guards the pre-2026-07-17 past — but that past is the part that cannot be
 re-measured by waiting.
+
+### What actually travels to the NAS
+
+"Move the repo to the NAS" does **not** move the data, and this trips people twice over.
+
+**`git clone` brings the 11 tracked files, nothing else:**
+
+```
+.gitignore  Marstek-planning.py  NAS-DEPLOYMENT-PLAN.md  README.md  advise.py
+clean_backtest_csv.py  influx_source.py  influx_to_backtest_csv.py
+p1_to_backtest_csv.py  plan-now.sh  run-matrix.sh
+```
+
+**Trap 1 — the P1 export was never inside the repo folder.** It lives at
+`/Users/sandeep/Personal/battery-data/`, a sibling of the git checkout entirely. Copying the
+repo directory, however thoroughly, does not touch it.
+
+**Trap 2 — even the data that *is* inside the repo folder is gitignored**, so a clone leaves
+it behind: `backtest_input_hourly.csv`, `backtest_input_hourly_clean.csv` and its sidecar,
+`price_cache/`, `results-raw-baseline/`, `plans/`, `logs/`, `pv_cache/`. That is the point of
+the `.gitignore` — this fork is public — but it means the ignore rules and the backup plan
+pull in opposite directions, and only the second one is a manual step.
+
+Copy out of band, in this order of importance:
+
+| what | from | size | why |
+|---|---|---|---|
+| `battery-data/` | `~/Personal/battery-data/` | 115 MB | **both irreplaceable sets** — EMA CSV and the Sparky P1 export |
+| `backtest_input_hourly.csv` | repo root | 292 KB | working copy; the master is in `battery-data/` |
+| `price_cache/` | repo root | 30 MB | saves ~522 EnergyZero calls; goes in the container's `/data` mount |
+| `results-raw-baseline/` | repo root | 13 MB | optional — one `./run-matrix.sh` rebuilds it |
+
+`battery-data/` must land **outside** the git checkout on the NAS too, or the next `git add`
+will offer to commit the meter EAN and service address to a public repo. Then set `P1_CSV` to
+wherever it landed, since the default path in `p1_to_backtest_csv.py` is a Mac path.
+
+A NAS is one machine. Copying to it makes a second copy, not a backup — if the point is
+surviving a dead disk, the NAS needs its own snapshot or off-box sync of that directory.
 
 ---
 

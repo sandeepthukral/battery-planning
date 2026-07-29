@@ -54,6 +54,9 @@ TZ = ZoneInfo("Europe/Amsterdam")
 # The Sparky export lives outside the repo on purpose: it carries the meter EAN, the
 # meter number and the service address, and this repo is a public fork. See
 # NAS-DEPLOYMENT-PLAN.md, "Irreplaceable data".
+#
+# It is also single-copy - no further export will be taken from Sparky - so this path
+# points at the only one there is. Override with P1_CSV rather than moving the file.
 DEFAULT_P1 = os.environ.get(
     "P1_CSV",
     "/Users/sandeep/Personal/battery-data/sparky-export-20260724/p1_elec_15min_agg.csv")
