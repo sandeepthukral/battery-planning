@@ -37,6 +37,9 @@ services:
       # against. Set them in .env if the collector's own values ever stop matching.
       ALPHAESS_SYS_SN: ${ALPHAESS_SYS_SN:-}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
+      # p1_to_backtest_csv.py defaults to the Mac path, which does not exist here. Point it at
+      # the read-only archive mount instead of moving the file, as its own comment asks.
+      P1_CSV: ${P1_CSV:-/archive/sparky-export-20260724/p1_elec_15min_agg.csv}
       # Both halves of the clock, from one knob. BT_TZ drives Marstek-planning.py's own
       # wall-clock helpers; TZ drives the shell `date` calls in plan-now.sh.
       BT_TZ: ${BT_TZ:-Europe/Amsterdam}
@@ -57,6 +60,15 @@ services:
       # files that appear here belong to whoever owns ./data on the host - no UID to configure
       # and no rebuild when it changes.
       - ./data:/data
+      # The irreplaceable archive: the APsystems EMA year and the Sparky P1/P4 export, which
+      # will never be exported again. Lives outside this checkout on purpose - a child of it
+      # would be one .gitignore slip away from a public fork - and read-only on purpose too:
+      # the one dataset that cannot be recreated should not be writable by the thing most
+      # likely to have a bug in it.
+      #
+      # Nothing on the planning path reads it. It is here for p1_to_backtest_csv.py and the
+      # backtest harness, run by hand.
+      - /volume1/docker/battery-archive:/archive:ro
     networks: [alphaess-net]
 
 networks:

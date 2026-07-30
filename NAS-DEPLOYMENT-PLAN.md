@@ -630,10 +630,68 @@ The Sparky export carries the meter EAN, the meter number and the service addres
 never enter the repo — hence the absolute path default in `p1_to_backtest_csv.py`, overridable
 with `P1_CSV`.
 
-**To do at deployment:** copy `battery-data/` to the NAS alongside `price_cache/`. Once
-plans and actuals are landing in InfluxDB (step 4) the collector becomes the durable record
-and this only guards the pre-2026-07-17 past — but that past is the part that cannot be
-re-measured by waiting.
+**Copied to the NAS 2026-07-30**, to `/volume1/docker/battery-archive/`, and verified: an
+md5 of every file's md5, sorted, matches on both sides — `4f73c759a2262f6e3d7b50ee93abff12`
+across all 16,704 files. Mounted into the container **read-only** at `/archive`, with
+`P1_CSV` pointed at it. Read-only because the one dataset that cannot be recreated should not
+be writable by the thing most likely to have a bug in it.
+
+It sits beside `battery-planning/`, never inside it: a child of the checkout is one
+`.gitignore` slip away from a public fork.
+
+Once plans and actuals are landing in InfluxDB (step 4) the collector becomes the durable
+record and this only guards the pre-2026-07-17 past — but that past is the part that cannot
+be re-measured by waiting.
+
+**The NAS copy is still not a backup.** SHR/RAID 1 survives a disk dying; it does not survive
+fire, theft, ransomware, or an accidental delete, which RAID mirrors faithfully. There is no
+Hyper Backup job. The 6.7 MB core (everything but `S3Export/`) fits in a private GitHub repo
+and would be the third copy — still to do.
+
+#### Getting it there: rsync does not work on DSM out of the box
+
+Recorded because it cost an hour and the error message points nowhere near the cause.
+
+`/usr/bin/rsync` on DSM is **setuid root** and refuses `--server` mode — the mode every
+incoming transfer uses — with:
+
+```
+rsync error: rsync service is no running (code 43)
+```
+
+Local rsync on the NAS works fine, so nothing looks broken until a transfer is attempted.
+Over SSH the message surfaces as a bare `Permission denied, please try again.`, which reads
+as an authentication failure and sends you off checking passwords and keys. It is not.
+`ssh -v` settles it: the trace says `Authenticated ... using "publickey"` and *then* the
+denial arrives, so the refusal is remote and post-login.
+
+Enabling **Control Panel → File Services → rsync** starts the daemon on 873 but did **not**
+lift the refusal here. The remaining suspect is that tab's *"SSH encryption port"* field,
+which reads 22 while SSH actually runs on 9922 — untested, because it was not worth risking
+the SSH session mid-transfer.
+
+`tar` over SSH sidesteps all of it, needs nothing installed, and is faster anyway — 16,690 of
+the files are tiny, and rsync pays a round trip per file where tar sends one stream:
+
+```sh
+cd ~/Personal/battery-data
+tar cf - --exclude '.DS_Store' --exclude '._*' . \
+  | ssh data42 'cd /volume1/docker/battery-archive && tar xf -'
+```
+
+No `z`: `S3Export/` is already gzipped.
+
+Verification, run on both sides and compared as one number — stronger than an rsync dry run,
+since it reads every byte unconditionally rather than trusting size and mtime:
+
+```sh
+# Mac
+find . -type f ! -name '.DS_Store' ! -name '._*' -print0 \
+  | xargs -0 md5 -r    | awk '{print $1, $2}' | sort | md5
+# NAS
+find . -type f ! -name '.DS_Store' ! -name '._*' -print0 \
+  | xargs -0 md5sum    | awk '{print $1, $2}' | sort | md5sum
+```
 
 ### What actually travels to the NAS
 
