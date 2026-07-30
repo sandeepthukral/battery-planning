@@ -44,8 +44,11 @@ services:
       # wall-clock helpers; TZ drives the shell `date` calls in plan-now.sh.
       BT_TZ: ${BT_TZ:-Europe/Amsterdam}
       TZ: ${BT_TZ:-Europe/Amsterdam}
-      # Written by section 4, once plans are stored in InfluxDB. Harmless until then.
-      #INFLUX_PLAN_BUCKET: ${INFLUX_PLAN_BUCKET:-planning}
+      # Where each live plan is stored. Separate from the actuals bucket above, and the
+      # scoped token allows write only here - the planner cannot alter measured history even
+      # if it tries. Confirmed on the NAS 2026-07-30: the bucket exists with a 400-day
+      # retention already set, so the series cannot grow without bound unwatched.
+      INFLUX_PLAN_BUCKET: ${INFLUX_PLAN_BUCKET:-planning}
       # Only consulted when docker itself had to create ./data, which leaves it owned by root
       # and therefore claimed by nobody. Otherwise the entrypoint takes the UID off the
       # existing directory and these are ignored.

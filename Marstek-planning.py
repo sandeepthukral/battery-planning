@@ -171,6 +171,10 @@ domoticzPort="8080"             # Domoticz port
 #   python3 influx_source.py
 useInflux=True
 influxProfileDays=7             # days of history to average into the hourly load profile
+# Store every live plan in InfluxDB as well as in the text file. BT_WRITE_PLAN=N turns it
+# off. Only live runs are written; a backtest sweeps hundreds of days and would bury the
+# real plans under replays of the past.
+writePlansToInflux=True
 
 # Site location, used for the PV forecast request and the solar-elevation calibration.
 # With Domoticz these came from its settings; standalone they are configured here.
@@ -192,7 +196,7 @@ MQTT_PUB = "hame_energy/VNSA-0/App/"    # the intial part of the MQTT publish st
 ##################################################################################################################################
 
 from operator import itemgetter, attrgetter
-from datetime import date,datetime,timedelta
+from datetime import date,datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
 import xml.etree.ElementTree as ET
 import requests
@@ -212,6 +216,7 @@ from sqlite3 import Error
 # Env overrides for settings declared in the configuration block above. They live here
 # because that block is evaluated before "import os".
 useTerminalReserve=os.environ.get("BT_RESERVE","Y").upper()!="N"
+writePlansToInflux=os.environ.get("BT_WRITE_PLAN","Y").upper()!="N"
 reserveFloorPct=int(os.environ.get("BT_RESERVE_FLOOR",str(reserveFloorPct)))
 
 # Replaying a past moment as if it were live ("what would the planner have advised at 06:00
@@ -1845,7 +1850,11 @@ def LPoptimization():
             "soc": int(sockWh[t].value()),
             "import": int(importWh[t].value()),
             "export": int(exportWh[t].value()),
-            "costs" : int(costsEuro[t].value()*10000)/10000
+            "costs" : int(costsEuro[t].value()*10000)/10000,
+            # Constant across the horizon - it is one boundary condition, not a per-interval
+            # decision. Repeated on every point so a dashboard can draw it as a line against
+            # soc without joining a second query.
+            "reserve": terminalReserveWh
             })
 
     return optimisationStatus,schedule
@@ -1891,6 +1900,55 @@ def printIntervalToFile(nr,record,fileHandle):
     print( priceList[nr][3]+" "+"{:>5d}".format(priceList[nr][4])+" "+"{:>5d}".format(priceList[nr][5])+" "+"{:>5d}".format(priceList[nr][6])+" "+"{:>5d}".format(priceList[nr][6]-priceList[nr][5]-priceList[nr][4]), end=" ",file=fileHandle)
     print("{:>5d}".format(priceList[nr][4])+" "+"{:>5d}".format(record["charge"])+" "+"{:>5d}".format(record["discharge"])+" "+"{:>5d}".format(record["soc"])+" "+"{:>5d}".format(record["import"])+" "+"{:>5d}".format(record["export"]),end=" ",file=fileHandle)
     print("{:>+1.6f}".format(priceList[nr][7])+" "+"{:>+1.6f}".format(priceList[nr][8])+" "+"{:>+2.6f}".format(record["costs"]),file=fileHandle)
+
+def writePlanToInflux(schedule,planRun):
+    # Record the plan beside the actuals, so "what did we intend at 14:05?" is a query rather
+    # than a hunt through text files, and so plan-vs-actual becomes one dashboard instead of
+    # a comparison between a file and a graph.
+    #
+    # pv_forecast_wh is the reason to do this early: nothing else stores the forecast
+    # anywhere, so every day it is not written is a day the forecast-vs-actual calibration
+    # can never be run for. That data does not become available again later.
+    #
+    # Deliberately non-fatal. By the time this runs the plan is already printed and on disk;
+    # a missing dashboard point is a smaller loss than a planning run that dies at the last
+    # step, and this is the step that depends on a service being up.
+    if not writePlansToInflux or influx_source is None or not influxAvailable:
+        return
+    lines=[]
+    for nr,record in enumerate(schedule):
+        if nr>=len(priceList): break
+        try:
+            # priceList[nr][2] is the interval start in UTC, which is the unambiguous one.
+            # The local string beside it repeats itself on the October DST night.
+            when=datetime.strptime(priceList[nr][2],"%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        lines.append(influx_source.linePoint("plan",
+            {"plan_run":planRun},
+            {"soc_wh":record["soc"],
+             "charge_wh":record["charge"],
+             "discharge_wh":record["discharge"],
+             "import_wh":record["import"],
+             "export_wh":record["export"],
+             "cost_eur":record["costs"],
+             "reserve_wh":record.get("reserve",0),
+             "price_buy":priceList[nr][7],
+             "price_sell":priceList[nr][8],
+             # The two panel groups are one roof as far as any dashboard is concerned.
+             "pv_forecast_wh":priceList[nr][4]+priceList[nr][5],
+             "load_forecast_wh":priceList[nr][6]},
+            when))
+    if not lines:
+        return
+    try:
+        written=influx_source.writePoints(lines)
+        print("InfluxDB: wrote %d plan intervals to bucket %s (plan_run=%s)"
+              %(written,influx_source.config()["plan_bucket"],planRun))
+    except Exception as e:
+        print("WARNING: could not write the plan to InfluxDB (%s)."%e)
+        print("         The plan itself is unaffected - it is printed above and in the output")
+        print("         file. Only the stored copy the dashboard reads is missing.")
 
 def outputToTextDevice(schedule,starthour,writeMode,optimisationStatus):
     # output to domoticz text device
@@ -2078,6 +2136,9 @@ def main():
     endDateObject=datetime.strptime(enddate,'%Y%m%d')
     runDate=startDateObject
     runHour=starthour
+    # Identifies this run in InfluxDB. Taken once, before the loop, so every interval of one
+    # plan carries the same tag - that is what "show me the current plan" filters on.
+    planRunStamp=(datetime.now(planningTZ) if planningTZ else localNow()).isoformat(timespec="seconds")
 
     while runDate<endDateObject or runDate==startDateObject:
 
@@ -2101,6 +2162,10 @@ def main():
         if runMode!="domoticz":
             print(datetime.strftime(runDate,'%Y%m%d'))
             outputOptimisationResult(result,schedule,outputFileName,writeMode)
+        # Live runs only. The loop below walks a date range, so a backtest would otherwise
+        # write hundreds of replayed days into the bucket under one plan_run stamp.
+        if runDate.date()==today:
+            writePlanToInflux(schedule,planRunStamp)
         # prepare for next day run
         runDate=runDate+timedelta(days=1)
         if runDate<endDateObject:

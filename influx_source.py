@@ -138,6 +138,10 @@ def config():
             "bucket": pick("INFLUX_BUCKET", "alphaess"),
             "sys_sn": pick("ALPHAESS_SYS_SN"),
             "poll_seconds": float(pick("POLL_INTERVAL_SECONDS", "30") or 30),
+            # Plans go in their own bucket, not beside the actuals. The collector's scoped
+            # token is read:alphaess + write:planning, so this separation is enforced by the
+            # credential as well as by convention - the planner cannot overwrite a measurement.
+            "plan_bucket": pick("INFLUX_PLAN_BUCKET", "planning"),
             "env_file": env_file,
         }
     return _config
@@ -181,6 +185,71 @@ def _query(flux):
             continue
         rows.append(row)
     return rows
+
+
+def _escapeTagPart(value):
+    """Escape a measurement name, tag key or tag value for line protocol."""
+    return str(value).replace("\\", "\\\\").replace(",", "\\,").replace(" ", "\\ ").replace("=", "\\=")
+
+
+def linePoint(measurement, tags, fields, timestamp):
+    """Build one line-protocol record. timestamp is an aware datetime; precision is seconds.
+
+    Fields are written as floats, including the ones that are conceptually whole watt-hours.
+    Mixing int (1i) and float for the same field name in the same measurement makes InfluxDB
+    reject the later type outright, and a field that is 0 on a dull day and 0.5 on a bright
+    one would do exactly that. One type everywhere costs nothing and cannot collide.
+    """
+    parts = [_escapeTagPart(measurement)]
+    for key in sorted(tags):
+        if tags[key] in (None, ""):
+            continue
+        parts.append("%s=%s" % (_escapeTagPart(key), _escapeTagPart(tags[key])))
+    fieldParts = []
+    for key in sorted(fields):
+        value = fields[key]
+        if value is None:
+            continue
+        fieldParts.append("%s=%s" % (_escapeTagPart(key), float(value)))
+    if not fieldParts:
+        raise ValueError("line protocol needs at least one field (measurement %s)" % measurement)
+    if timestamp.tzinfo is None:
+        # A naive timestamp is read as local time, which is what every wall-clock value in
+        # this project means. Only when tzdata is missing entirely does UTC stand in, so the
+        # points still land somewhere defined rather than following the process's idea of local.
+        timestamp = timestamp.replace(tzinfo=LOCAL_TZ or timezone.utc)
+    return "%s %s %d" % (",".join(parts), ",".join(fieldParts), int(timestamp.timestamp()))
+
+
+def writePoints(lines, bucket=None, batch=1000):
+    """POST line-protocol records to /api/v2/write. Returns how many lines were written.
+
+    Raises on any failure. The caller decides whether that is fatal - for the planner it is
+    not: the plan text file is already on disk by then and losing the InfluxDB copy costs a
+    dashboard point, not the advice.
+    """
+    c = config()
+    if not configured():
+        raise RuntimeError("InfluxDB is not configured; cannot write. Searched the "
+                           "environment, then %s." % c["env_file"])
+    target = bucket or c["plan_bucket"]
+    written = 0
+    for start in range(0, len(lines), batch):
+        chunk = lines[start:start + batch]
+        resp = requests.post(
+            c["url"] + "/api/v2/write",
+            params={"org": c["org"], "bucket": target, "precision": "s"},
+            data="\n".join(chunk).encode("utf-8"),
+            headers={"Authorization": "Token " + c["token"],
+                     "Content-Type": "text/plain; charset=utf-8"},
+            timeout=30)
+        if resp.status_code >= 400:
+            # Influx puts the useful part in the body - which field collided, which line
+            # failed to parse - and raise_for_status() throws all of it away.
+            raise RuntimeError("write to bucket %r failed: HTTP %d %s"
+                               % (target, resp.status_code, resp.text[:400]))
+        written += len(chunk)
+    return written
 
 
 def _sys_filter():
@@ -302,7 +371,8 @@ def _selftest():
     print("  env file : %s (%s)" % (c["env_file"], "found" if os.path.exists(c["env_file"]) else "MISSING"))
     print("  url      : %s" % (c["url"] or "<not set>"))
     print("  org      : %s" % c["org"])
-    print("  bucket   : %s" % c["bucket"])
+    print("  bucket   : %s (read)" % c["bucket"])
+    print("  plans to : %s (write)" % c["plan_bucket"])
     print("  sys_sn   : %s" % (c["sys_sn"] or "<all>"))
     print("  token    : %s" % ("set (%d chars)" % len(c["token"]) if c["token"] else "<not set>"))
     if not configured():
