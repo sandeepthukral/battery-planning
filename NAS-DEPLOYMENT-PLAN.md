@@ -821,21 +821,68 @@ Next-day check is a Flux join of `planning.pv_forecast_wh` against `alphaess.pv_
 
 ---
 
-## 5. Grafana panel
+## 5. Grafana panel — **BUILT** (in `alphaess-collector`, branch `battery-plan-dashboard`)
 
-**Cross-repo:** the dashboard JSON goes in `alphaess-collector/grafana/` and needs a mount
-line added to *that* repo's `docker-compose.yml`, alongside the four existing dashboards.
-The provisioning provider already picks up anything in `/var/lib/grafana/dashboards`.
+**Cross-repo:** `grafana/alphaess-battery-plan.json` in the *collector* repo, plus one mount
+line in that repo's `docker-compose.yml` beside the four existing dashboards. The
+provisioning provider already picks up anything in `/var/lib/grafana/dashboards`, and the
+compose entrypoint's `sed` only rewrites `${DS_ALPHAESS}`, so other `${...}` in the JSON
+survives for Grafana to interpolate.
 
-`alphaess-battery-plan.json`, four panels:
+**One datasource, two buckets.** The provisioned `alphaess` datasource has `defaultBucket:
+alphaess`, but every Flux query names its bucket explicitly, so it reads `planning` too — no
+second datasource. Confirmed the token allows it: InfluxDB carries an authorization described
+`grafana: r alphaess, r planning`.
 
-1. **Planned SoC vs actual SoC**, next ~36 h. The plan line running ahead of the measured
-   line is the whole story in one picture.
-2. **Planned charge/discharge** as bars against the **buy/sell price** line, so the reason
-   for each action is visible.
-3. **Action table** — the `advise.py` blocks: from, to, action, kWh, W setpoint, ct/kWh.
-4. **Plan age** — a stat panel showing time since the newest `plan_run`. If the scheduled
-   task dies, the dashboard says so instead of quietly showing a stale plan.
+Seven panels:
+
+1. **Plan age** — seconds since the newest `plan_run`. Amber past 3.5 h, red past 4 h; the
+   schedule is every 3 h. This is the panel that makes a dead scheduler announce itself,
+   which is exactly the failure that went unnoticed on 2026-07-29.
+2. **Planned benefit over horizon** — `sum(cost_eur)`. Verified equal to the "total benefit"
+   line `advise.py` prints for the same run (4.8863 vs +4.89 EUR).
+3. **Planned SoC at horizon end** and 4. **Terminal reserve**, side by side. Equal means the
+   reserve is binding and is the only thing preventing an end-of-window dump — the defect
+   this whole reserve mechanism exists to fix, made visible at a glance.
+5. **Planned SoC vs actual SoC**, with the reserve as a dashed floor.
+6. **Planned charge/discharge** as bars, discharge drawn negative, against the buy/sell price
+   on a right-hand axis.
+7. **Planned actions** — every interval the plan does something in.
+
+### Two things deliberately not done
+
+**The action table is per-interval, not `advise.py`'s merged blocks.** Those blocks are built
+in Python from the same numbers and are not stored. Rebuilding the merge in Flux would mean
+writing it twice and letting the two drift; the honest options are to keep it per-interval
+now, or to store the blocks later and read them.
+
+**Panel 5 shows only the newest plan.** Stitching "the plan that was in force at each
+interval" is the harder query and belongs to [section 6](#6-the-day-after-report-plan-vs-what-actually-happened--not-built-wanted),
+which is what needs it.
+
+### `plan_run` had to become UTC first
+
+Designing panel 5 surfaced a real bug in section 4. Picking "the newest plan" means ordering
+a tag, and a tag has no order but its string. `2026-10-25T02:05+02:00` sorts **above**
+`2026-10-25T02:05+01:00` while being an hour **earlier** — so on the October DST night every
+panel would have shown the stale 02:05 plan until 05:05, silently, once a year.
+
+Fixed at the source: `plan_run` is now UTC RFC3339 with `Z`, where lexicographic order is
+chronological order. The dashboard *additionally* parses the tag with `time(v:)` rather than
+sorting it, which is correct for both formats — the two plans written on 2026-07-30 before
+the fix carry a local offset and are read correctly anyway.
+
+### Capacity is a dashboard variable
+
+The plan stores SoC in Wh; every percentage divides by usable capacity, which is not in
+InfluxDB. `capacity_wh` is a **textbox** variable defaulting to 27900 — textbox rather than
+constant, because Grafana hides constants entirely, which is the opposite of the point.
+
+### Verified
+
+All nine queries in the dashboard were run against the live InfluxDB before committing, with
+`${capacity_wh}` and the time-range macros substituted as Grafana would. Every one returns
+rows. Not yet verified: how it *looks* — that needs the stack restarted on the NAS.
 
 ---
 
@@ -932,7 +979,7 @@ the NAS. Until then there is nothing to compare against.
 | TZ | Run the container at 13:30 and 14:30 local; confirm the 14:30 run reports the **longer** horizon. This is the bug that would otherwise hide indefinitely |
 | 3 | Trigger the DSM task by hand; confirm a plan appears with the right local timestamp. Then let one scheduled run fire unattended and read the log |
 | 4 | **Done on the Mac** (124 intervals × 11 fields, one tag; terminal SoC = `reserve_wh`). Still to check on the NAS: two runs within one hour leave two distinct `plan_run` tags, neither overwriting the other |
-| 5 | Panel shows the current plan, and after a few hours the actual SoC line visibly diverging from it |
+| 5 | All nine Flux queries verified against the live database. Still to check: restart the collector stack, open **AlphaESS Battery Plan**, confirm the panels render and the actual SoC line diverges from the planned one over a few hours |
 | 6 | Run the report for a day whose plans are already stored and check the euro figures by hand against the plan text file for the same day. Then run it for a date with **no** stored plan and confirm it says so rather than reporting a zero gap |
 | regression | The Domoticz guard must still report **0 calls attempted** — now from inside the container |
 
