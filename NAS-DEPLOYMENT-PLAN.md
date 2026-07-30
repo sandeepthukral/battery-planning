@@ -71,6 +71,15 @@ Volume itself is small: ~96 intervals × 8 runs ≈ 770 points/day.
 
 **`read:alphaess` + `write:planning`.** Not a `planning`-only token.
 
+**Delivered 2026-07-30 as `INFLUX_TOKEN_PLANNING`.** The collector replaced its single admin
+token with four narrowly-scoped ones; that is the name ours has on its side. `influx_source.py`
+reads either `INFLUX_TOKEN_PLANNING` or `INFLUX_TOKEN`, preferring the specific name within a
+given source, so the value can be copied across without being renamed on the way.
+
+The preference matters for the sibling-checkout fallback on the Mac: the collector's `.env`
+may hold both, and taking its `INFLUX_TOKEN` there would quietly reach for an admin token
+while the correctly-scoped one sat beside it.
+
 The planner reads from `alphaess` on every single run:
 
 | field | used for |
@@ -278,14 +287,18 @@ The failure message now names what is missing and every path searched, and says 
 variables from docker-compose when in a container:
 
 ```
-InfluxDB is not configured: missing INFLUX_URL (or INFLUX_HOST) and INFLUX_TOKEN.
+InfluxDB is not configured: missing INFLUX_URL (or INFLUX_HOST) and INFLUX_TOKEN (or
+  INFLUX_TOKEN_PLANNING).
   Searched: the environment, then /nonexistent/.env, then /app/../../alphaess-collector/.env.
   Copy .env.example to .env and fill it in, or set the variables directly (in a
   container, pass them from docker-compose).
 ```
 
-**At deployment:** `cp .env.example .env` on the NAS and fill in `INFLUX_TOKEN` with the
-`read:alphaess` + `write:planning` token from the cross-repo contract. That file is gitignored
+**At deployment:** `cp .env.example .env` on the NAS and fill in `INFLUX_TOKEN_PLANNING` with
+the `read:alphaess` + `write:planning` token of the same name from the collector's `.env`.
+`entrypoint.sh` refuses to start when neither name is set, naming both - compose's own
+`${VAR:?}` guard cannot express "one of these two", which is why that check moved into the
+entrypoint. That file is gitignored
 and does not travel — it is created by hand, once, on the NAS. Passing the same variables
 through `docker-compose.yml` instead is equally valid and takes precedence.
 
@@ -311,7 +324,7 @@ It is a credential parked ahead of the PV-forecast work (section 7). Consequence
 
 | item | where it goes | if missing |
 |---|---|---|
-| `INFLUX_TOKEN` (read `alphaess`, write `planning`) | NAS `.env`, from `.env.example` | run refuses at `BT_INITCHARGE=influx`, now with an actionable message |
+| `INFLUX_TOKEN_PLANNING` (read `alphaess`, write `planning`) | NAS `.env`, from `.env.example` | container refuses to start, naming both accepted variable names |
 | `INFLUX_URL=http://influxdb:8086` | same `.env`, or compose | falls back to the LAN IP, which hairpins or fails from inside the container |
 | docker network name | `docker-compose.yml`, confirmed on the NAS | container will not start |
 | `battery-data/` | outside the checkout | irreplaceable history lost — see 2b |
@@ -418,7 +431,8 @@ services:
     build: .
     environment:
       INFLUX_URL: http://influxdb:8086
-      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-}
+      INFLUX_TOKEN_PLANNING: ${INFLUX_TOKEN_PLANNING:-}
       INFLUX_ORG: ${INFLUX_ORG:-home}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}     # read: actuals
       INFLUX_PLAN_BUCKET: ${INFLUX_PLAN_BUCKET:-planning}   # write: plans

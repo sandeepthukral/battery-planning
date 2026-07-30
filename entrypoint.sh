@@ -65,6 +65,31 @@ EOF
     exit 1
 fi
 
+# A token has to be present. This used to be `${INFLUX_TOKEN:?...}` in docker-compose, but
+# there are now two acceptable names - the collector issues INFLUX_TOKEN_PLANNING, scoped to
+# read:alphaess + write:planning - and compose interpolation cannot say "one of these two".
+# Checking here keeps the fail-fast and gains the ability to accept either.
+#
+# Only the environment is checked. A token in .env beside influx_source.py would also work,
+# but that file does not exist in the image; in a container the value arrives through
+# docker-compose or not at all, so an empty one here means the run is already lost.
+if [ -z "${INFLUX_TOKEN:-}" ] && [ -z "${INFLUX_TOKEN_PLANNING:-}" ]; then
+    cat >&2 <<'EOF'
+ERROR: no InfluxDB token in the environment.
+
+  The planner builds every plan from the measured state of charge and refuses to run
+  without it, so this stops here rather than three minutes in.
+
+  Set one of these in the .env beside docker-compose.yml - either name is read, and the
+  more specific one wins if both appear:
+
+      INFLUX_TOKEN_PLANNING=...    the scoped token from alphaess-collector
+      INFLUX_TOKEN=...             the same value under the generic name
+
+EOF
+    exit 1
+fi
+
 # HOME is not set by gosu. Point it somewhere writable so anything calling expanduser("~")
 # lands in the container's own tmpfs instead of failing or writing into the mount.
 export HOME=/tmp

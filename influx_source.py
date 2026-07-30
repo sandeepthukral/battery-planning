@@ -35,6 +35,9 @@ and is the one to use anywhere but a dev machine.
     INFLUX_URL       e.g. http://influxdb:8086        (required, or INFLUX_HOST)
     INFLUX_HOST      host only; INFLUX_PORT defaults to 8086
     INFLUX_TOKEN     API token                        (required)
+                     INFLUX_TOKEN_PLANNING is accepted too, and preferred where both
+                     appear - that is the name the collector gives the scoped token
+                     for this planner (read:alphaess + write:planning)
     INFLUX_ORG       default "home"
     INFLUX_BUCKET    default "alphaess"
     ALPHAESS_SYS_SN  optional; filters to one system
@@ -113,6 +116,22 @@ def config():
             return (os.environ.get(key) or fromfile.get(key)
                     or collector.get(key) or default)
 
+        def pickToken():
+            # alphaess-collector used to hold one admin token as INFLUX_TOKEN. It now issues
+            # four narrowly-scoped ones, and the planner's is INFLUX_TOKEN_PLANNING:
+            # read on alphaess, write on planning. Accept either name.
+            #
+            # Source order still decides - our own .env beats the collector's - but within a
+            # source the specific name wins. That matters for the sibling-checkout fallback:
+            # the collector's file may hold both, and picking its INFLUX_TOKEN there would
+            # quietly reach for an admin token while the correctly-scoped one sat beside it.
+            for source in (os.environ, fromfile, collector):
+                for key in ("INFLUX_TOKEN_PLANNING", "INFLUX_TOKEN"):
+                    value = source.get(key)
+                    if value:
+                        return value
+            return ""
+
         url = pick("INFLUX_URL")
         if not url:
             # the collector's .env records only the port, since it reaches InfluxDB
@@ -122,7 +141,7 @@ def config():
             url = "http://%s:%s" % (host, port) if host else ""
         _config = {
             "url": url.rstrip("/"),
-            "token": pick("INFLUX_TOKEN"),
+            "token": pickToken(),
             "org": pick("INFLUX_ORG", "home"),
             "bucket": pick("INFLUX_BUCKET", "alphaess"),
             "sys_sn": pick("ALPHAESS_SYS_SN"),
@@ -146,7 +165,8 @@ def _query(flux):
         # only INFLUX_ENV_FILE, which pointed at the wrong fix in a container: there the
         # answer is to pass INFLUX_TOKEN through docker-compose, not to repath a .env.
         missing = [k for k, v in (("INFLUX_URL (or INFLUX_HOST)", c["url"]),
-                                  ("INFLUX_TOKEN", c["token"])) if not v]
+                                  ("INFLUX_TOKEN (or INFLUX_TOKEN_PLANNING)",
+                                   c["token"])) if not v]
         raise RuntimeError(
             "InfluxDB is not configured: missing %s.\n"
             "  Searched: the environment, then %s, then %s.\n"

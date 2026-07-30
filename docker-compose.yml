@@ -19,9 +19,15 @@ services:
       # alphaess-collector-influxdb-1; using that name instead would break whenever the
       # collector stack is recreated with a different suffix.
       INFLUX_URL: ${INFLUX_URL:-http://influxdb:8086}
+      # alphaess-collector issues four narrowly-scoped tokens; ours is INFLUX_TOKEN_PLANNING
+      # (read:alphaess + write:planning). Either name works in .env - influx_source.py reads
+      # both and prefers the specific one - so the value can be copied across without being
+      # renamed on the way.
+      #
       # No default on purpose. An absent token would otherwise surface much later as a
       # refusal inside the planner; this stops the container before it starts.
-      INFLUX_TOKEN: ${INFLUX_TOKEN:?set INFLUX_TOKEN in .env beside this file}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-}
+      INFLUX_TOKEN_PLANNING: ${INFLUX_TOKEN_PLANNING:-}
       INFLUX_ORG: ${INFLUX_ORG:-home}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
       # Both halves of the clock, from one knob. BT_TZ drives Marstek-planning.py's own
