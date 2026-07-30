@@ -81,4 +81,28 @@ fi
 plan=plans/plan_${today}_${hour}.txt
 mv entsoe-output${today}.txt $plan
 print "plan written to $plan"
-$PY advise.py $plan | tee -a $log
+
+# We run every 3 hours; a plan shorter than that plus slack leaves gaps where nothing has
+# been decided if the next run is late or fails. 12h is the floor: normally the horizon runs
+# to ~15:00 next day (see the comment above BT_END), so hitting this means something starved
+# the price fetch (e.g. a stale price_cache entry from before tomorrow's auction published).
+#
+# Capture first, print second, rather than piping into tee. A pipeline would make $? the
+# exit status of tee (always 0) and hide the check entirely, and the usual cure - reading
+# the pipeline's first element - is not portable:
+#
+#   zsh   ${pipestatus[1]}     arrays are 1-indexed
+#   bash  ${PIPESTATUS[0]}     arrays are 0-indexed
+#
+# Same concept, same spelling apart from case, different index. Translating this file to
+# bash by mechanically lowercasing would read tee's status and leave the guard compiled,
+# tested and dead. Detecting the shell (`if [ -n "$ZSH_VERSION" ]`) works, but it keeps a
+# silent-failure mode alive to solve a problem that disappears if the pipe does. advise.py
+# prints a few lines instantly, so there is nothing to stream.
+advise_out=$($PY advise.py --min-hours 12 "$plan" 2>&1)
+advise_rc=$?
+printf '%s\n' "$advise_out" | tee -a "$log"
+if [ "$advise_rc" -ne 0 ]; then
+  printf '%s\n' "plan horizon check failed (see ERROR above); treating this run as failed"
+  exit 1
+fi

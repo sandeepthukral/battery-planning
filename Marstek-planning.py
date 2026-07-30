@@ -1235,12 +1235,17 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
     else:
         url = "https://public.api.energyzero.nl/public/v1/prices?date="+loadStartDate+"&interval=INTERVAL_QUARTER&energyType=ENERGY_TYPE_ELECTRICITY"
 
-    # cache raw EnergyZero JSON per date+interval so repeated backtest runs don't refetch
+    # cache raw EnergyZero JSON per date+interval so repeated backtest runs don't refetch.
+    # A live run's rundate is today (or later): its cache entry can have been written before
+    # tomorrow's day-ahead auction published, and would then never be refreshed, permanently
+    # starving the plan of tomorrow's prices. Only historical (rundate < today) entries are
+    # stable enough to trust from disk; today/future always refetch and overwrite.
     cacheDir=os.environ.get("BT_PRICE_CACHE","price_cache")
     cacheKey=loadStartDate.replace("-","")+("_h" if (hourAvgPlanning or runDate<datetime.strptime("20251001","%Y%m%d")) else "_q")
     cacheFile=os.path.join(cacheDir,cacheKey+".json")
+    isHistorical=rundate_local<today
     responseText=None
-    if os.path.exists(cacheFile):
+    if isHistorical and os.path.exists(cacheFile):
         with open(cacheFile) as cf:
             responseText=cf.read()
     else:
@@ -1253,6 +1258,11 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
                     cf.write(responseText)
             except Exception:
                 pass
+        elif os.path.exists(cacheFile):
+            # refetch failed (network hiccup): fall back to whatever was cached rather than
+            # returning nothing
+            with open(cacheFile) as cf:
+                responseText=cf.read()
 
     if responseText is not None:
         basePrices=json.loads(responseText)

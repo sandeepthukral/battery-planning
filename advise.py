@@ -197,11 +197,18 @@ def actuals(rows):
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    minHours = 0.0
+    rawArgs = sys.argv[1:]
+    if "--min-hours" in rawArgs:
+        i = rawArgs.index("--min-hours")
+        minHours = float(rawArgs[i + 1])
+        rawArgs = rawArgs[:i] + rawArgs[i + 2:]
+    args = [a for a in rawArgs if not a.startswith("--")]
+    flags = {a for a in rawArgs if a.startswith("--")}
     if not args:
         print(__doc__)
         raise SystemExit(2)
+    tooShort = False
     for path in args:
         rows = readPlan(path)
         if not rows:
@@ -210,3 +217,11 @@ if __name__ == "__main__":
         render(rows, path, showIdle="--all" in flags)
         if "--actuals" in flags:
             actuals(rows)
+        if minHours:
+            minutes = intervalMinutes(rows)
+            span = (rows[-1]["ts"] + timedelta(minutes=minutes) - rows[0]["ts"]).total_seconds() / 3600.0
+            if span + 1e-9 < minHours:
+                print("  ERROR: horizon is only %.2fh, need >= %.1fh (stale/short price data?)" % (span, minHours))
+                tooShort = True
+    if tooShort:
+        raise SystemExit(1)
