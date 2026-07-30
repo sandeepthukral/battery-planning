@@ -30,6 +30,13 @@ services:
       INFLUX_TOKEN_PLANNING: ${INFLUX_TOKEN_PLANNING:-}
       INFLUX_ORG: ${INFLUX_ORG:-home}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
+      # Both used to arrive via influx_source.py's old fallback into the collector's .env.
+      # That is gone, so compose has to carry them. Empty is fine and is the normal case:
+      # an unset sys_sn means "every system in the bucket", which with one battery is the
+      # same rows, and the poll interval only sets the default the coverage check compares
+      # against. Set them in .env if the collector's own values ever stop matching.
+      ALPHAESS_SYS_SN: ${ALPHAESS_SYS_SN:-}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
       # Both halves of the clock, from one knob. BT_TZ drives Marstek-planning.py's own
       # wall-clock helpers; TZ drives the shell `date` calls in plan-now.sh.
       BT_TZ: ${BT_TZ:-Europe/Amsterdam}
