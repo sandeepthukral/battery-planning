@@ -71,7 +71,17 @@ services:
       #
       # Nothing on the planning path reads it. It is here for p1_to_backtest_csv.py and the
       # backtest harness, run by hand.
-      - /volume1/docker/battery-archive:/archive:ro
+      #
+      # Corrected 2026-07-31. This pointed at /volume1/docker/battery-archive, a copy made on
+      # 29 July that is both in the wrong place and incomplete: inside /volume1/docker/, where
+      # the plan says the archive must never live because a stack rebuild can reach it, and
+      # short 7 of the 16,700 S3Export files. It also carried 21,069 AppleDouble `._*` sidecars
+      # from a macOS tar run without COPYFILE_DISABLE=1, which is most of its 215 MB.
+      #
+      # The dated directory is a variable rather than a literal so that the next archive is an
+      # .env line instead of an edit here - and so a restore can be mounted for comparison
+      # without touching the compose file.
+      - ${ARCHIVE_DIR:-/volume1/documents/battery-archive/battery-archive-20260730}:/archive:ro
     networks: [alphaess-net]
 
 networks:
