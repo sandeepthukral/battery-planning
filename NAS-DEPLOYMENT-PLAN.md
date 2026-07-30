@@ -668,9 +668,12 @@ signature of a Finder/SMB copy, not of the `tar` command written down below, whi
 never live, because a stack rebuild can reach it.
 
 `docker-compose.yml` now mounts the `documents` copy, via `ARCHIVE_DIR` so the next dated
-archive is a `.env` line rather than an edit. **The `/volume1/docker/battery-archive` copy
-should be deleted** once the mount change is deployed — it is 215 MB of a strictly worse copy
-of data that exists complete twice elsewhere.
+archive is a `.env` line rather than an edit. **`/volume1/docker/battery-archive` was deleted
+2026-07-30**, after checking that the two files that cannot be recreated —
+`backtest_input_hourly.csv` and `sparky-export-20260724/p1_elec_15min_agg.csv` — were present
+at identical size and mtime in the `documents` copy and on the Mac, and that the `-nopii`
+tarball had reached Google Drive. Three copies before removing the fourth, and the fourth was
+the only bad one.
 
 The lesson is narrow and worth keeping: *a checksum recorded in a document proves nothing
 about a directory later.* Both copies looked fine from a listing. Only counting files against
