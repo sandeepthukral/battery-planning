@@ -1,4 +1,5 @@
 .venv/
+.env
 price_cache/
 results/
 entsoe-output*.txt
@@ -6,5 +7,27 @@ entsoe*.xml
 __pycache__/
 .DS_Store
 
-# Household load/solar export - private, not for publication
+# Household load/solar export - private, not for publication.
+# This repo is a fork of a public upstream and is therefore public itself. A year of hourly
+# household load is occupancy data: it shows when the house is empty, when we sleep and
+# which weeks we were away. The code that BUILDS these files is committed; the files are not.
+# Regenerate with clean_backtest_csv.py / influx_to_backtest_csv.py, and copy them to the
+# NAS out of band, the same way price_cache/ is handled.
 backtest_input_hourly.csv
+backtest_input_hourly_clean.csv
+backtest_input_hourly_clean.excluded.json
+backtest_influx_*.csv
+backtest_p1_*.csv
+backtest_p1_*.excluded.json
+
+# Backtest run outputs - the "use" column is the same household load data
+results-raw-baseline/
+
+# advisory plans and run logs (household data)
+plans/
+logs/
+pv_cache/
+solarforecast.json
+
+# scratch PR text, not part of the project
+PR-DESCRIPTION.md

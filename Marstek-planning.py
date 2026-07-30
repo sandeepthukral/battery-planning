@@ -34,16 +34,148 @@ batterySwitchIDX=419            # the IDX of the Domoticz selector switch for co
 #################################
 # hard coded definition of pv panels groups (can be extended further)
 # spec includes the following fields : [connection-type,angle-vs-horizontal,azimuth-vs-south,total-kWh-peak]
-pvSpecGroup1=["indirect",55,58,2.75]    # "indirect" means connected to the house network, not directly to the battery
-pvSpecGroup2=["direct",7,-30,0.82]      # "direct" means connected to the battery PV connections (MPPT or AC input)
+# "indirect" means connected to the house network, not directly to the battery
+# "direct" means connected to the battery PV connections (MPPT or AC input)
+# This installation is 12 x 415 Wp = 4.98 kWp, all AC-coupled (no "direct"/DC group).
+# Azimuth ~0 (due south): verified against measured production, whose centroid on clear
+# June days falls at 13:51 local vs a modelled solar noon of 13:45.
+# Tilt values below are estimates: the seasonal signal needed to fit tilt is swamped by the
+# low-sun loss corrected for in pvElevationCalibration(), so tilt could not be fitted from
+# the production history. Adjust if the real roof pitch is known.
+pvSpecGroup1=["indirect",35,0,3.735]    # 9 panels on the tilted roof
+pvSpecGroup2=["indirect",10,0,1.245]    # 3 panels flat on the shed
 pvGroups=[]
 pvGroups.append(pvSpecGroup1)
 pvGroups.append(pvSpecGroup2)
 # repeat the above logic for each group of PV panels.
 
+# PV forecast calibration ##########
+# Measured yield is 801 kWh/kWp/yr (3987 kWh from 4.98 kWp), well under the ~900-950 a
+# clear-sky model predicts for this location. The shortfall is not a flat derate: binning
+# measured-vs-modelled output by solar elevation on the clearest days of each month shows
+# the array performs normally when the sun is high and collapses when it is low, in every
+# azimuth sector roughly equally:
+#     elevation   0-10   10-20   20-30   30-40   40+
+#     retained    0.24    0.55    0.69    0.87   1.00   (normalised to the high-sun plateau)
+# Causes are mixed (surrounding obstructions, high angle-of-incidence reflection, inverter
+# low-light behaviour, winter soiling/snow) but for forecasting only the shape matters.
+# pvElevationCalibration() corrects the SHAPE; pvOverallCalibration corrects the LEVEL.
+pvCalibrateForecast=True        # set False to feed raw forecast.solar values into the planning
+pvOverallCalibration=1.00       # tune so that a full simulated year lands on ~801 kWh/kWp
+pvPlanningFactor=0.85           # extra conservatism: over-forecast PV costs more than under-forecast
+# (elevation_deg, retained_fraction) breakpoints, linearly interpolated
+pvElevationLossCurve=[(0,0.20),(7.5,0.27),(12.5,0.53),(17.5,0.57),(22.5,0.67),
+                      (27.5,0.71),(32.5,0.79),(37.5,0.95),(45,1.00),(90,1.00)]
+
+# End-of-horizon reserve ##########
+# Without this the optimiser values leftover stored energy at zero and therefore sells the
+# battery down to the minimum SOC in the last hours of every planning window - it was
+# dumping 23.8 kWh -> 2.8 kWh over the final four hours. The reserve is a boundary
+# condition, not a forecast: it stops the horizon-edge dump. Because the planner re-runs
+# every hour it is always recomputed with fresher data long before it would be acted on.
+#
+# The reserve must last from the end of the known prices until the next chance to refill,
+# which is whichever comes first:
+#   - the sun taking over (forecast PV exceeds forecast load), or
+#   - the next cheap grid hour
+#
+# "Cheap" must not be assumed to mean "overnight". Measured over 2025-07..2026-06 the
+# cheapest hour of the average day is midday from March to September (solar glut, cheapest
+# hour 13:00-14:00) and pre-dawn only from October to February. A reserve rule that looks
+# for a night-time low will misjudge two thirds of the year.
+#
+# So the refill hour is read from real prices wherever the planning window supplies them,
+# using the average price per hour-of-day across the window. Only for hours the window does
+# not cover does it fall back to typicalCheapHourByMonth, which is measured, not guessed:
+# the cheapest hour of the mean day per month over that same year of EnergyZero prices.
+useTerminalReserve=True         # BT_RESERVE=N overrides this, to A/B test without it
+reserveFloorPct=15              # never end the window below this SOC %, whatever the sums say
+reserveMarginPct=25             # safety margin on the forecast load the reserve must cover
+#                                Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec
+typicalCheapHourByMonth=        [  4,  4, 13, 14, 13, 14, 14, 13, 13,  3,  4,  4]
+cheapQuantile=0.25              # an hour counts as a refill chance if it sits in this
+#                                cheapest fraction of the window's hour-of-day price profile
+reserveMaxHours=24              # cap on how far ahead the reserve is asked to stretch.
+#                                Must clear a winter night-to-midday gap: in December the
+#                                window can end at 23:00 with no cheap hour until 04:00 and
+#                                no useful sun at all, and January load averages 23.5 kWh/day
+#                                against ~25 kWh usable, so a full day on one fill is real.
+
+# Battery and inverter ##########
+# The installed hardware, in one place. These are the DEFAULTS every entry point inherits;
+# BT_CAP / BT_MAXCHG / BT_MAXDIS still override for backtests and what-if runs. The values
+# this file shipped with (2100 Wh, 1200 W, 800 W) described the author's 2.1 kWh Marstek and
+# were wrong for this installation in every field.
+#
+# Charge and discharge ceilings are MEASURED, not nameplate: p99 over 11 days of 30 s
+# samples from the collector. The 5 kW inverter does not reach its rating - discharge tops
+# out at 4700 W (matching observation exactly) and charge at 4850 W (p99 4840, max 4868).
+# Planning at 5000 W overstates the hardware by 3-6%.
+#
+# Upgrade path (10 kW inverter + three phase, planned):
+#   inverter   nameplate   plan at        because
+#   5 kW       5000 W      4850 / 4700    measured, current
+#   10 kW      10000 W     ~9700 / ~9400  same 97% / 94% derate, until re-measured
+# Do not simply put 10000 here on install day. Re-run the p99 against a few days of
+# collector data once it is running and set the real numbers, exactly as was done for the
+# 5 kW unit. A 10 kW inverter also forces three-phase: 10 kW will not pass a single-phase
+# 25 A fuse (5750 W), so gridConnectionLimit below must move at the same time.
+ratedBatteryCapacity=27900      # Wh, AlphaESS
+maxChargeSpeed=4850             # W, measured p99 - see above before changing
+maxDischargeSpeed=4700          # W, measured p99
+# 6800 EUR all-in / (6000 cycles x 27.9 kWh x 90% DoD) = 0.0451 EUR per kWh discharged.
+# Assumes the 6000-cycle warranty is the life and charges the whole install against
+# throughput, so it errs high. Inherited default was 0.052, derived for the 2.1 kWh Marstek.
+cycleCosts=0.0451
+
+# Grid connection limit ##########
+# maxChargeSpeed limits the BATTERY, not the meter. The energy balance makes grid import a
+# derived quantity - import = load + charge + export - pv - discharge - so the actual draw
+# at the meter is the charge rate PLUS whatever the house is using MINUS whatever the sun
+# is giving. Force-charging at 4850 W with an 800 W house load and no sun pulls 5650 W from
+# the grid, which is a number the optimiser was previously free to exceed without noticing:
+# importWh and exportWh had no upper bound at all.
+#
+# The limit that matters is the fuse the BATTERY sits behind, not the whole-house total,
+# because a single-phase battery loads one phase no matter how many the house has:
+#
+#   connection   battery wiring   binding limit
+#   3x35A        single phase     35A x 230V  =  8050 W   <- current setup, ~3 kW headroom
+#   3x35A        three phase      3 x 8050    = 24150 W
+#   3x25A        single phase     25A x 230V  =  5750 W   <- WATCH THIS ONE
+#   3x25A        three phase      3 x 5750    = 17250 W
+#
+# The 3x25A single-phase case is the one to think about before the planned upgrade this
+# year: 4850 W of charging plus a 900 W house load is 5750 W, exactly the fuse. Downgrading
+# amperage without moving the battery to three phase turns a slack constraint into a binding
+# one, and the planner would start refusing to charge at full rate. That is the correct
+# behaviour - better a slower plan than a tripped main - but it should not be a surprise.
+#
+# Set in watts via BT_GRIDMAX. 0 disables the constraint (the old unbounded behaviour).
+gridConnectionLimit=8050        # W, single-phase battery on the current 3x35A connection
+gridLimitAppliesToExport=True   # the same fuse carries export; a 4.98 kWp array cannot
+#                                approach it, but the constraint is free to state
+
 ## Domoticz server
+# This installation does NOT use Domoticz. Set useDomoticz=True to restore the original
+# behaviour: every Domoticz function is still present and unmodified, they are simply not
+# reached while this is False. The cords are cut at the three places Domoticz would still
+# be contacted outside "-d"/"-i" mode (getLocation, calcHourlyAvgUsage) plus the CLI flags.
+useDomoticz=False
 domoticzIP="192.168.178.218"    # IP address of the Domoticz server. Can be set to 127.0.0.1 if planning is run at domoticz system itself.
 domoticzPort="8080"             # Domoticz port
+
+## InfluxDB (alphaess-collector) - the live data source replacing Domoticz.
+# Supplies battery SOC and recent hourly load/PV. Connection settings come from the
+# environment or the collector's own .env: see influx_source.py. Self-test with
+#   python3 influx_source.py
+useInflux=True
+influxProfileDays=7             # days of history to average into the hourly load profile
+
+# Site location, used for the PV forecast request and the solar-elevation calibration.
+# With Domoticz these came from its settings; standalone they are configured here.
+siteLatitude="52.5"             # degrees north
+siteLongitude="5.5"             # degrees east
 
 # all communication with domoticz devices/database is with JSON calls 
 baseJSON="http://"+domoticzIP+":"+domoticzPort+"/json.htm?"   # the base string for any JSON call.
@@ -76,6 +208,64 @@ import paho.mqtt.client as mqtt
 
 import sqlite3
 from sqlite3 import Error
+
+# Env overrides for settings declared in the configuration block above. They live here
+# because that block is evaluated before "import os".
+useTerminalReserve=os.environ.get("BT_RESERVE","Y").upper()!="N"
+reserveFloorPct=int(os.environ.get("BT_RESERVE_FLOOR",str(reserveFloorPct)))
+
+# Replaying a past moment as if it were live ("what would the planner have advised at 06:00
+# on 26 July?"). The historical branch always loads a full 48h of prices, which for a
+# morning run is clairvoyant: tomorrow's day-ahead is not published until early afternoon,
+# so a 06:00 plan built on it is not a plan anyone could have followed. Set BT_ASOF_HOUR to
+# the simulated wall-clock hour and prices beyond the run date are hidden until the
+# publication hour. Unset (-1) leaves every existing run untouched.
+simulateAsOfHour=int(os.environ.get("BT_ASOF_HOUR","-1"))
+pricePublishHour=int(os.environ.get("BT_PRICE_PUBLISH_HOUR","13"))
+
+# Saldering (NL net metering) ends on 1 January 2027. While it applies, an exported kWh is
+# netted against an imported one and therefore earns the full retail price; afterwards
+# export earns only the market price plus VAT. The difference is not cosmetic - it roughly
+# halves what the battery earns, and it reverses specific advice. Emptying the battery into
+# a 33 ct morning is free money under saldering and loses about 14 ct/kWh without it.
+#
+# The regime belongs to the interval being planned, not to the day the plan is made: a
+# horizon built on 31 December 2026 runs into 1 January 2027 and must switch mid-plan.
+#
+# Three modes, because the backtest matrix needs to force both regimes on the same dates:
+#   auto (default)  decide per interval from salderingEndDate
+#   on              force net metering on   (also what the -n flag does)
+#   off             force it off
+salderingEndDate="2027-01-01"          # first date on which saldering no longer applies
+salderingMode=os.environ.get("BT_SALDERING","auto").lower()
+if salderingMode not in ("auto","on","off"):
+    print("WARNING: BT_SALDERING=%s is not auto/on/off; falling back to auto"%salderingMode)
+    salderingMode="auto"
+
+def salderingApplies(localDate):
+    if salderingMode=="on":
+        return True
+    if salderingMode=="off":
+        return False
+    return localDate.strftime("%Y-%m-%d")<salderingEndDate
+
+# InfluxDB source (alphaess-collector). Optional: if the module is missing or has no
+# connection settings, the planner keeps working and simply reports the missing data.
+try:
+    # influx_source.py sits next to this file; make that work regardless of cwd or of
+    # being launched through a wrapper, otherwise the import fails and the live plan
+    # silently falls back to zero expected load
+    sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
+    import influx_source
+    influxAvailable=influx_source.configured()
+    if useInflux and not influxAvailable:
+        print("WARNING: useInflux is set but InfluxDB is not configured (need INFLUX_URL/INFLUX_HOST + INFLUX_TOKEN).")
+        print("         Run 'python3 influx_source.py' to check.")
+except ImportError as e:
+    influx_source=None
+    influxAvailable=False
+    if useInflux:
+        print("WARNING: useInflux is set but influx_source.py could not be imported : ",e)
 
 today=date.today()
 todayString=datetime.strftime(today,'%Y%m%d')
@@ -226,27 +416,61 @@ def _ask(envname, prompt, default):
     v = os.environ.get(envname)
     if v is not None and v != "":
         return v
+    if v == "":
+        # Set but empty means something upstream failed to produce a value rather than
+        # choosing to omit it - the Linux "date -v+1d" case, which yields an empty BT_END
+        # instead of an error. Say so; silently substituting a default here would hide a
+        # broken caller behind a plan that looks fine.
+        print("WARNING: %s is set but empty; using the default (%s)"%(envname,default))
+        return default
+    if not sys.stdin.isatty():
+        # No terminal means a scheduled run: cron, a container, or output redirected to a
+        # log. input() there raises EOFError at best and blocks forever at worst. Taking
+        # the default is what makes the constants at the top of this file the single source
+        # of truth for unattended runs, so plan-now.sh can set no hardware variables at all.
+        return default
     return input(prompt) or default
 
 def getUserInput():
     # get user input, with limited (!!) input validation, only used in standalone mode
     # every prompt can be pre-set via an environment variable for scripted batch runs
-    global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts,MACaddress
+    global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts,MACaddress,gridConnectionLimit
     startdate=_ask("BT_START","Enter startdate as YYYYMMDD (default=today)   : ",todayString)
     enddate=_ask("BT_END","Enter enddate as YYYYMMDD (default=startdate+1) : ",datetime.strftime(datetime.strptime(startdate,'%Y%m%d')+timedelta(days=1),'%Y%m%d'))
     starthour=int(_ask("BT_STARTHOUR","Enter start hour as HH (default next hour)   : ",datetime.strftime(datetime.now()+timedelta(hours=1),'%H')))
-    initialCharge=int(_ask("BT_INITCHARGE","Enter initial charge in Wh (default=0) :","0"))
-    ratedBatteryCapacity=int(_ask("BT_CAP","Enter rated capacity in Wh (default 2100) :",2100))
+    ratedBatteryCapacity=int(_ask("BT_CAP","Enter rated capacity in Wh (default %d) :"%ratedBatteryCapacity,ratedBatteryCapacity))
+    # standalone mode normally takes a fixed starting charge, which is what a backtest wants.
+    # A scheduled live run must start from the battery as it actually is, so BT_INITCHARGE=influx
+    # reads the current SOC instead. It refuses rather than guessing: planning a real day from a
+    # wrong starting charge is worse than not planning it.
+    initialChargeSpec=_ask("BT_INITCHARGE","Enter initial charge in Wh, or 'influx' (default=0) :","0")
+    if str(initialChargeSpec).strip().lower()=="influx":
+        responseResult,chargeLevel=getBatteryChargeLevel()
+        if not responseResult or chargeLevel is None:
+            print("ERROR: BT_INITCHARGE=influx but the current SOC could not be read. Refusing to plan.")
+            raise SystemExit(4)
+        initialCharge=int(round(chargeLevel))
+        print("initial charge from InfluxDB : %d Wh (%.1f%% of %d Wh)"%(
+            initialCharge,100.0*initialCharge/ratedBatteryCapacity,ratedBatteryCapacity))
+    else:
+        initialCharge=int(initialChargeSpec)
     minBatterySOCPct=int(_ask("BT_MINSOC","Enter minimum SOC in percent (default 12) :",12))
-    maxChargeSpeed=int(_ask("BT_MAXCHG","Enter max charge speed in Watt (default 1200) :",1200))
-    maxDischargeSpeed=int(_ask("BT_MAXDIS","Enter max discharge speed in Watt (default 800) :",800))
+    maxChargeSpeed=int(_ask("BT_MAXCHG","Enter max charge speed in Watt (default %d) :"%maxChargeSpeed,maxChargeSpeed))
+    maxDischargeSpeed=int(_ask("BT_MAXDIS","Enter max discharge speed in Watt (default %d) :"%maxDischargeSpeed,maxDischargeSpeed))
+    # the fuse the battery sits behind, in Watt; 0 disables. See gridConnectionLimit above
+    # for why this is not the same number as maxChargeSpeed.
+    gridConnectionLimit=int(_ask("BT_GRIDMAX","Enter grid connection limit in Watt, 0=none (default %d) :"%gridConnectionLimit,gridConnectionLimit))
+    if gridConnectionLimit and gridConnectionLimit<=maxChargeSpeed:
+        print("WARNING: grid limit %d W is at or below the %d W charge rate. Charging alone "
+              "would fill the connection, leaving nothing for the house load."
+              %(gridConnectionLimit,maxChargeSpeed))
     RTE=int(_ask("BT_RTE","Enter conversion efficiency percentage RTE (default 85) :",85))
     onewayEff=float((100-(100-RTE)/2)/100)
     entsoeToken='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'  # paste in your own security token from entsoe.eu
     MACaddress="xxxxxxxxxxxxxxxxxx" # paste the MAC address of your battery system here.
     energyTax=float(_ask("BT_ETAX","Enter energy tax in Euro per kWh (default 0.11085) :",0.11085)) # energy tax , incl btw, Euro per kWh
     supplierCosts=0.01682  # supplier/purchasing costs per kWh incl btw
-    cycleCosts=float(os.environ.get("BT_CYCLECOSTS","0.052")) # Example for ( 600 euro/6000 cycles) / (2 * 2.1 kWh * 88% Depth of Discharge)
+    cycleCosts=float(os.environ.get("BT_CYCLECOSTS",cycleCosts)) # default set with the battery constants at the top of this file
     vatPCT=1.21  # VAT/BTW 21%
     networkCosts=0 # network costs per kWh, future development
 
@@ -323,6 +547,9 @@ def getPlanningInput():
 
 def getLocation():
     # function to get the value of a location defined in settings
+    if not useDomoticz:
+        # standalone: take the location from the configuration block instead of Domoticz
+        return True,siteLatitude,siteLongitude
     try:
         apiCall="type=command&param=getsettings"
         response = requests.get(baseJSON+apiCall)
@@ -455,6 +682,26 @@ def getHourlyDataFromShortHistory(varIDX):
 def calcHourlyAvgUsage(varIDX,weightIncrease):
     # calculate hourly average values for meter device
     # weightIncrease >1 gives more weight to recent usage
+    if useInflux and influxAvailable:
+        # average the recent hourly load recorded by alphaess-collector
+        try:
+            hourlyAvgs,nrDays=influx_source.hourlyAvgProfileWh(
+                influx_source.FIELD_LOAD,days=influxProfileDays,weightIncrease=weightIncrease)
+            if nrDays>0:
+                if outputMode or debug:
+                    print("load profile from InfluxDB over ",nrDays," day(s), daily total ",
+                          sum(v for _,v in hourlyAvgs)," Wh")
+                return True,hourlyAvgs
+            print("ERROR: InfluxDB returned no load samples for the last ",influxProfileDays," days")
+        except Exception as e:
+            print("ERROR: cannot read load history from InfluxDB : ",e)
+        return False,[]
+    if not useDomoticz:
+        # no Domoticz history to average. This only affects planning for TODAY; backtests
+        # read measured load from the CSV instead and are unaffected.
+        print("WARNING: no load history source without Domoticz - planning today with zero expected load.")
+        print("         Set useDomoticz=True or useInflux=True, or supply a load forecast.")
+        return False,[]
     responseResult,varString=getHourlyDataFromShortHistory(varIDX)
     if responseResult:
         hourlyAvgs= [[f"{hour:02d}", 0] for hour in range(24)]
@@ -483,12 +730,25 @@ def calcHourlyAvgUsage(varIDX,weightIncrease):
 def getBatteryChargeLevel():
     # get actual current battery charge level from SOC and MAX capacity
     chargeLevel=None
+    if useInflux and influxAvailable:
+        # SoC as recorded by alphaess-collector
+        try:
+            SOCPercent=influx_source.latestSocPercent()
+            if SOCPercent is not None:
+                return True,float(SOCPercent/100*ratedBatteryCapacity)
+            print("ERROR: no recent SOC sample in InfluxDB")
+        except Exception as e:
+            print("ERROR: cannot read SOC from InfluxDB : ",e)
+        return False,None
     try:
         responseResult,SOCPercent=getPercentageDevice(batterySOCIDX)
         if responseResult:
-            responseResult,ratedBatteryCapacity=getUserVariable(ratedBatteryCapacityIDX)
+            # named apart from the global on purpose: assigning ratedBatteryCapacity here
+            # would make it local to this whole function, and the Influx branch above reads
+            # the global before this line ever runs (UnboundLocalError)
+            responseResult,domoticzRatedCapacity=getUserVariable(ratedBatteryCapacityIDX)
             if responseResult:
-                chargeLevel=float(SOCPercent/100*int(ratedBatteryCapacity))
+                chargeLevel=float(SOCPercent/100*int(domoticzRatedCapacity))
                 responseResult=True
             else:
                 print("ERROR: retrieving max Capacity failed")
@@ -626,6 +886,22 @@ def setBatteryAction(action,scheduleDateTime,power,schedule):
 
 _BACKTEST_CSV = os.environ.get("BACKTEST_CSV", "backtest_input_hourly.csv")
 _backtest_cache = None
+_backtest_excluded = None
+
+def backtestExcludedDates():
+    # dates dropped by clean_backtest_csv.py (whole days of missing load written as zero).
+    # Without this the planner would still run them as zero-load/zero-solar days, which the
+    # optimiser reads as a free day rather than as absent data.
+    global _backtest_excluded
+    if _backtest_excluded is None:
+        _backtest_excluded = set()
+        sidecar = _BACKTEST_CSV.rsplit(".", 1)[0] + ".excluded.json"
+        try:
+            with open(sidecar) as f:
+                _backtest_excluded = set(json.load(f).get("excluded_dates", []))
+        except (OSError, ValueError):
+            pass  # no sidecar (e.g. running against the raw CSV): exclude nothing
+    return _backtest_excluded
 
 def _load_backtest_csv():
     # load the AlphaESS backtest CSV once into a dict keyed by "YYYY-MM-DD HH"
@@ -675,8 +951,39 @@ def getHrValueFromBIGDB(runDate,device):
         d = d + timedelta(days=1)
     return hourValueList
 
+def pvCacheFileName(groupSpec,runNow=None):
+    # one cache entry per panel group per clock hour. The hour bucket is deliberate: a
+    # scheduled run every 3 hours must get a fresh forecast, but a retry, a manual re-run
+    # or a debugging loop inside the same hour must not spend another request. The free
+    # tier allows about 12 requests per hour per IP and two panel groups exhaust it fast.
+    cacheDir=os.environ.get("BT_PV_CACHE","pv_cache")
+    stamp=(runNow or datetime.now()).strftime("%Y%m%d%H")
+    key="%s_%s_%s_%s"%(groupSpec[1],groupSpec[2],groupSpec[3],stamp)
+    return os.path.join(cacheDir,key.replace("/","_")+".json")
+
+def prunePVcache(keepHours=48):
+    # forecasts age out; keep a couple of days so a plan can be explained after the fact
+    cacheDir=os.environ.get("BT_PV_CACHE","pv_cache")
+    cutoff=(datetime.now()-timedelta(hours=keepHours)).strftime("%Y%m%d%H")
+    try:
+        for name in os.listdir(cacheDir):
+            stamp=name.rsplit("_",1)[-1].split(".")[0]
+            if len(stamp)==10 and stamp.isdigit() and stamp<cutoff:
+                os.remove(os.path.join(cacheDir,name))
+    except Exception:
+        pass
+
 def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
     # request the PV production forecast from forecast.solar and store in a file
+    cacheFile=pvCacheFileName(groupSpec)
+    if os.path.exists(cacheFile):
+        try:
+            with open(cacheFile,"rb") as cf, open(pvForecastFileName,"wb") as f:
+                f.write(cf.read())
+            if debug: print("PV forecast for group %s served from cache %s"%(groupSpec,cacheFile))
+            return True
+        except Exception as e:
+            print("WARNING: could not read PV cache %s (%s); refetching"%(cacheFile,e))
     try:
         # url components for https feed from forecast.solar
         urlwebsite='https://api.forecast.solar'
@@ -695,15 +1002,36 @@ def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
                 with open(pvForecastFileName, 'wb') as f:
                     f.write(response.content)
                     fileReceived=True
+                try:
+                    os.makedirs(os.path.dirname(cacheFile) or ".",exist_ok=True)
+                    with open(cacheFile,'wb') as cf:
+                        cf.write(response.content)
+                    prunePVcache()
+                except Exception:
+                    pass
             else:
-                print("ERROR: no proper PV panel forecast file received")
+                # forecast.solar reports the reason in the body; the free tier allows about
+                # 12 requests per hour per IP, which an hourly planner with two panel groups
+                # can exhaust on its own, so say which failure this is
+                detail=""
+                try:
+                    msg=response.json().get("message",{})
+                    limit=msg.get("ratelimit",{})
+                    detail=" (%s; rate limit %s/%ss, %s remaining)"%(
+                        msg.get("text") or response.status_code,
+                        limit.get("limit"),limit.get("period"),limit.get("remaining"))
+                except Exception:
+                    detail=" (HTTP %s)"%response.status_code
+                print("ERROR: no PV forecast for group %s%s"%(groupSpec,detail))
                 fileReceived=False
                 raise Exception
         else:
             print("ERROR : required parameters for requesting PV forecast not found")
             raise Exception
-    except:
-        print("ERROR: no proper PV panel forecast file received")
+    except SystemExit:
+        raise
+    except Exception as e:
+        print("ERROR: no proper PV panel forecast file received : %s"%e)
         fileReceived=False
     return fileReceived
 
@@ -834,9 +1162,11 @@ def parsePricesIntoList(runDate,hourAverage=False,local_tz="Europe/Amsterdam"):
             processed_times.add(start_time)
             quarter_times.append(start_time)
             price_kwh = prev_price / 1000.0
+            # the local date decides the saldering regime, so it is needed before the prices
+            start_local = start_time.astimezone(local_zone)
             if includeTax:
                 price_usage=price_kwh*vatPCT+energyTax+supplierCosts+networkCosts
-                if saldering:
+                if salderingApplies(start_local):
                     price_return=price_usage
                 else:
                     price_return=price_kwh*vatPCT
@@ -844,8 +1174,6 @@ def parsePricesIntoList(runDate,hourAverage=False,local_tz="Europe/Amsterdam"):
                 price_usage=price_kwh
                 price_return=price_usage
 
-
-            start_local = start_time.astimezone(local_zone)
             # ---- filter: rundate and rundate + 1 ----
             if start_local.date() not in (rundate_local, next_day_local):
                 continue
@@ -907,12 +1235,17 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
     else:
         url = "https://public.api.energyzero.nl/public/v1/prices?date="+loadStartDate+"&interval=INTERVAL_QUARTER&energyType=ENERGY_TYPE_ELECTRICITY"
 
-    # cache raw EnergyZero JSON per date+interval so repeated backtest runs don't refetch
+    # cache raw EnergyZero JSON per date+interval so repeated backtest runs don't refetch.
+    # A live run's rundate is today (or later): its cache entry can have been written before
+    # tomorrow's day-ahead auction published, and would then never be refreshed, permanently
+    # starving the plan of tomorrow's prices. Only historical (rundate < today) entries are
+    # stable enough to trust from disk; today/future always refetch and overwrite.
     cacheDir=os.environ.get("BT_PRICE_CACHE","price_cache")
     cacheKey=loadStartDate.replace("-","")+("_h" if (hourAvgPlanning or runDate<datetime.strptime("20251001","%Y%m%d")) else "_q")
     cacheFile=os.path.join(cacheDir,cacheKey+".json")
+    isHistorical=rundate_local<today
     responseText=None
-    if os.path.exists(cacheFile):
+    if isHistorical and os.path.exists(cacheFile):
         with open(cacheFile) as cf:
             responseText=cf.read()
     else:
@@ -925,6 +1258,11 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
                     cf.write(responseText)
             except Exception:
                 pass
+        elif os.path.exists(cacheFile):
+            # refetch failed (network hiccup): fall back to whatever was cached rather than
+            # returning nothing
+            with open(cacheFile) as cf:
+                responseText=cf.read()
 
     if responseText is not None:
         basePrices=json.loads(responseText)
@@ -939,7 +1277,7 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
 
             if includeTax:
                 price_usage=price_kwh*vatPCT+energyTax+supplierCosts+networkCosts
-                if saldering:
+                if salderingApplies(start_local):
                     price_return=price_usage
                 else:
                     price_return=price_kwh*vatPCT #!!! to be done: include supplier and network costs?
@@ -977,8 +1315,57 @@ def findForecast(intervalDate,intervalHr,forecastList):
         elementNr+=1
     return forecastWh
 
-def mergeForecastWithPricelist(groupSpec,forecastList):
+_locationCache=None
+
+def solarElevation(intervalDate,intervalHr):
+    # solar elevation in degrees at the midpoint of the given local hour (NOAA approximation)
+    try:
+        localDT=datetime.strptime(intervalDate+" "+intervalHr,"%Y-%m-%d %H").replace(tzinfo=ZoneInfo("Europe/Amsterdam"))
+    except ValueError:
+        return 90.0 # unparseable: apply no correction
+    utcDT=(localDT+timedelta(minutes=30)).astimezone(ZoneInfo("UTC"))
+    global _locationCache
+    if _locationCache is None:
+        _locationCache=getLocation() # one HTTP call per run, not one per interval
+    responseResult,latitude,longitude=_locationCache
+    if not responseResult:
+        return 90.0
+    lat,lon=float(latitude),float(longitude)
+    n=utcDT.timestamp()/86400.0+2440587.5-2451545.0
+    meanLong=(280.460+0.9856474*n)%360
+    meanAnom=math.radians((357.528+0.9856003*n)%360)
+    eclipLong=math.radians(meanLong+1.915*math.sin(meanAnom)+0.020*math.sin(2*meanAnom))
+    obliquity=math.radians(23.439-0.0000004*n)
+    declination=math.asin(math.sin(obliquity)*math.sin(eclipLong))
+    rightAsc=math.atan2(math.cos(obliquity)*math.sin(eclipLong),math.cos(eclipLong))
+    gmst=(18.697374558+24.06570982441908*n)%24
+    localSidereal=(gmst+lon/15.0)%24
+    hourAngle=math.radians(((localSidereal*15.0-math.degrees(rightAsc)+180)%360)-180)
+    latRad=math.radians(lat)
+    elevation=math.asin(math.sin(latRad)*math.sin(declination)
+                        +math.cos(latRad)*math.cos(declination)*math.cos(hourAngle))
+    return math.degrees(elevation)
+
+def pvElevationCalibration(intervalDate,intervalHr):
+    # fraction of the forecast this array actually delivers at this sun elevation, see
+    # the pvElevationLossCurve comment block at the top of this file
+    elevation=solarElevation(intervalDate,intervalHr)
+    if elevation<=pvElevationLossCurve[0][0]:
+        return pvElevationLossCurve[0][1]
+    for i in range(1,len(pvElevationLossCurve)):
+        elevLow,factorLow=pvElevationLossCurve[i-1]
+        elevHigh,factorHigh=pvElevationLossCurve[i]
+        if elevation<=elevHigh:
+            span=elevHigh-elevLow
+            if span<=0:
+                return factorHigh
+            return factorLow+(factorHigh-factorLow)*(elevation-elevLow)/span
+    return pvElevationLossCurve[-1][1]
+
+def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
     # merge forecast onto pricelist as separate fields
+    # applyCalibration must stay False for measured/historical values: the calibration
+    # corrects forecast.solar's bias, and actuals carry no such bias
     global priceList
     for intervalNr,interval in enumerate(priceList):
         intervalDate=interval[3][0:10] # date of local time in pricelist
@@ -986,7 +1373,10 @@ def mergeForecastWithPricelist(groupSpec,forecastList):
         if hourAvgPlanning:
             pvForecast=findForecast(intervalDate,intervalHr,forecastList)
         else:
-            pvForecast=int(findForecast(intervalDate,intervalHr,forecastList)/4) # some rounding is o.k.
+            pvForecast=round(findForecast(intervalDate,intervalHr,forecastList)/4) # some rounding is o.k.
+        if applyCalibration and pvCalibrateForecast:
+            pvForecast=round(pvForecast*pvElevationCalibration(intervalDate,intervalHr)
+                             *pvOverallCalibration*pvPlanningFactor)
         if groupSpec[0]=="direct":
             priceList[intervalNr][4]+=pvForecast
         else:
@@ -1061,6 +1451,31 @@ def dropHistoryFromPricelist(runHour):
     for interval in range(maxDrop):
         priceList.pop(0)
 
+def dropUnpublishedFromPricelist(runDate):
+    # Hide prices that had not been published yet at the simulated moment. Day-ahead prices
+    # for the next day appear around 13:00 local, so a replayed 06:00 run must see only the
+    # run date. Inactive unless BT_ASOF_HOUR is set, so live runs and backtests are unchanged.
+    global priceList
+    if simulateAsOfHour<0 or simulateAsOfHour>=pricePublishHour:
+        return
+    runDay=datetime.strftime(runDate,'%Y-%m-%d')
+    before=len(priceList)
+    priceList=[interval for interval in priceList if interval[3][0:10]<=runDay]
+    if outputMode or debug:
+        print("as-of %02d:00: next day prices not published until %02d:00, %d of %d intervals hidden"
+              %(simulateAsOfHour,pricePublishHour,before-len(priceList),before))
+
+def dropExcludedFromPricelist():
+    # discard intervals falling on dates the CSV cleaner dropped. Skipping an excluded date
+    # as a runDate is not enough: the planning horizon spans ~48h, so the PREVIOUS day's run
+    # still commits hours on the excluded day, where absent CSV rows read as zero load and
+    # zero PV - i.e. as a free day rather than as missing data.
+    global priceList
+    excluded=backtestExcludedDates()
+    if not excluded:
+        return
+    priceList=[interval for interval in priceList if interval[3][0:10] not in excluded]
+
 def getSOC(findHour,schedule):
     # find the SOC for the given hour
     # searching backwards
@@ -1104,13 +1519,28 @@ def buildInitialPlanningList():
 
         if len(priceList)>0 and runDate.date()==today:
             if includePV:
+                # A failed forecast fetch used to leave PV at zero, which the optimiser reads
+                # as a heavily overcast day rather than as missing data - and then confidently
+                # buys grid power to cover load the roof would have supplied. forecast.solar
+                # allows only ~12 requests per hour per IP, so this is a routine failure, not
+                # a rare one. Refuse to plan instead of planning on a silent zero.
+                missingGroups=0
                 for groupSpec in pvGroups:
                     forecastList=parsePVforecastIntoList(groupSpec)
                     if len(forecastList)>0:
-                        mergeForecastWithPricelist(groupSpec,forecastList)
+                        mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=True)
+                    else:
+                        missingGroups+=1
                     if outputMode:
                         for record in priceList:
                             print ("merged pv ",record)
+                if missingGroups:
+                    print("ERROR: no PV forecast for %d of %d panel group(s)."%(missingGroups,len(pvGroups)))
+                    print("       Planning on zero PV would look like a dull day and would buy")
+                    print("       grid power the roof was going to supply. Refusing to plan.")
+                    print("       Set BT_ALLOW_NO_PV=Y to override, or drop -p to plan without PV.")
+                    if os.environ.get("BT_ALLOW_NO_PV","N").upper()!="Y":
+                        raise SystemExit(3)
 
         # add the hourly usage forecast
             if includeUsage:
@@ -1151,11 +1581,101 @@ def buildInitialPlanningList():
                         mergeActualWithPricelist(usageList)
 
                 dropHistoryFromPricelist(runHour)
+                dropUnpublishedFromPricelist(runDate)
+                dropExcludedFromPricelist()
 
         if outputMode:
             for record in priceList:
                 print ("without history ",record)
 ##### end of all function to collect input data   #####
+
+def hourlyShapeFromPriceList():
+    # average load, PV and buy price per hour-of-day across the planning window.
+    # Derived from priceList itself so it works identically for a live plan (forecasts) and
+    # a backtest (measured actuals), with no extra data source. counts says how many
+    # intervals fed each hour, so callers can tell a measured hour from an uncovered one.
+    loadSum=[0.0]*24
+    pvSum=[0.0]*24
+    priceSum=[0.0]*24
+    counts=[0]*24
+    for interval in priceList:
+        hr=int(interval[3][11:13])
+        loadSum[hr]+=interval[6]
+        pvSum[hr]+=interval[4]+interval[5]
+        priceSum[hr]+=interval[7]
+        counts[hr]+=1
+    # load and PV are per interval; at 15-min planning four intervals make an hour, and the
+    # reserve is expressed in whole hours, so scale back up. Price is per kWh either way.
+    perHour=1 if hourAvgPlanning else 4
+    loadAvg=[(loadSum[h]/counts[h])*perHour if counts[h] else 0.0 for h in range(24)]
+    pvAvg=[(pvSum[h]/counts[h])*perHour if counts[h] else 0.0 for h in range(24)]
+    priceAvg=[priceSum[h]/counts[h] if counts[h] else None for h in range(24)]
+    return loadAvg,pvAvg,priceAvg,counts
+
+def hoursUntilRefill(startHour,month,loadAvg,pvAvg,priceAvg,counts):
+    """Hours from startHour until the battery can next be refilled. Returns (hours,reason).
+
+    Two things end the reserve period, whichever comes first:
+      - the sun takes over, i.e. forecast PV exceeds forecast load
+      - grid power gets cheap again
+
+    "Cheap" is relative to the window's own price profile rather than to a fixed clock
+    hour, because the cheapest hour of the day is midday for two thirds of the year here
+    and pre-dawn only in Oct-Feb. Where the window covers an hour its measured price
+    decides; where it does not, the month's typical cheap hour stands in.
+    """
+    known=[p for p in priceAvg if p is not None]
+    threshold=None
+    if known:
+        ranked=sorted(known)
+        idx=max(0,min(len(ranked)-1,int(len(ranked)*cheapQuantile)-1))
+        threshold=ranked[idx]
+    fallbackHour=typicalCheapHourByMonth[month-1]
+    for step in range(reserveMaxHours):
+        hr=(startHour+step)%24
+        if pvAvg[hr]>loadAvg[hr] and pvAvg[hr]>0:
+            return step,"sun takes over"
+        if counts[hr]:
+            if threshold is not None and priceAvg[hr]<=threshold:
+                return step,"cheap hour (%.4f <= %.4f)"%(priceAvg[hr],threshold)
+        elif hr==fallbackHour:
+            return step,"typical cheap hour for month %02d"%month
+    return reserveMaxHours,"reserveMaxHours cap"
+
+def calcTerminalReserveWh():
+    # how much charge must remain at the end of the planning window, in Wh
+    if not useTerminalReserve or len(priceList)==0:
+        return 0
+    floorWh=int(reserveFloorPct/100*ratedBatteryCapacity)
+    loadAvg,pvAvg,priceAvg,counts=hourlyShapeFromPriceList()
+
+    endHour=int(priceList[-1][3][11:13])
+    # the window's last interval is the START of that hour, so the reserve begins after it
+    startHour=(endHour+1)%24
+    month=int(priceList[-1][3][5:7])
+
+    hoursNeeded,reason=hoursUntilRefill(startHour,month,loadAvg,pvAvg,priceAvg,counts)
+    if hoursNeeded==0:
+        # the window already ends at the refill opportunity: only the floor applies
+        if outputMode or debug:
+            print("terminal reserve: window ends %02d:00, refill immediately (%s) -> floor only %d Wh"
+                  %(endHour,reason,floorWh))
+        return floorWh
+
+    # the reserve covers what the grid must supply, so PV expected during the reserve
+    # period counts against it - a sunny morning needs less carried through the night
+    needWh=sum(max(0.0,loadAvg[(startHour+s)%24]-pvAvg[(startHour+s)%24])
+               for s in range(hoursNeeded))
+    needWh=needWh*(1+reserveMarginPct/100)
+    reserveWh=max(int(needWh),floorWh)
+    # never demand more than the battery can hold
+    reserveWh=min(reserveWh,int(ratedBatteryCapacity))
+    if outputMode or debug:
+        print("terminal reserve: window ends %02d:00, refill in %d h (%s), "
+              "net load need %d Wh, floor %d Wh -> reserve %d Wh (%.0f%% SOC)"
+              %(endHour,hoursNeeded,reason,int(needWh),floorWh,reserveWh,
+                reserveWh/ratedBatteryCapacity*100))
+    return reserveWh
 
 #### the actual optimsation function  #####
 
@@ -1181,9 +1701,29 @@ def LPoptimization():
     # VARIABLES
     chargeWh = pulp.LpVariable.dicts("charge", range(nrIntervals), lowBound=0, upBound=maxChargeSpeed) # this is indirect charge from PV not connected directly
     dischargeWh = pulp.LpVariable.dicts("discharge", range(nrIntervals), lowBound=0, upBound=maxDischargeSpeed)
-    sockWh = pulp.LpVariable.dicts("soc", range(nrIntervals), lowBound=int(float(minBatterySOCPct/100*ratedBatteryCapacity)), upBound=ratedBatteryCapacity)
-    importWh = pulp.LpVariable.dicts("import", range(nrIntervals), lowBound=0)
-    exportWh = pulp.LpVariable.dicts("export", range(nrIntervals), lowBound=0)
+    socFloorWh=int(float(minBatterySOCPct/100*ratedBatteryCapacity))
+    sockWh = pulp.LpVariable.dicts("soc", range(nrIntervals), lowBound=socFloorWh, upBound=ratedBatteryCapacity)
+    # The minimum-SOC rule is a rule for the plan, not a description of the battery. If the
+    # battery is ACTUALLY below the floor when planning starts, applying the floor to the
+    # first interval too makes the whole problem infeasible and the planner emits nothing -
+    # exactly when a plan is most needed. Let interval 0 accept reality; every later
+    # interval keeps the floor, so the plan climbs back at the first opportunity.
+    if nrIntervals>0 and initialCharge is not None and int(initialCharge)<socFloorWh:
+        sockWh[0].lowBound=int(initialCharge)
+        if outputMode or debug:
+            print("initial charge %d Wh is below the %d%% floor (%d Wh); relaxing the floor for "
+                  "the first interval only"%(int(initialCharge),minBatterySOCPct,socFloorWh))
+    # Grid connection limit. maxChargeSpeed bounds the battery; this bounds the meter, and
+    # the two are different numbers because the house load rides on the same fuse. Expressed
+    # per interval like the charge caps below: a Watt limit is Wh/interval only when the
+    # interval is an hour. 0 (or None) leaves import/export unbounded, as before.
+    if gridConnectionLimit:
+        gridLimitPerInterval=gridConnectionLimit if hourAvgPlanning else gridConnectionLimit/4
+    else:
+        gridLimitPerInterval=None
+    importWh = pulp.LpVariable.dicts("import", range(nrIntervals), lowBound=0, upBound=gridLimitPerInterval)
+    exportWh = pulp.LpVariable.dicts("export", range(nrIntervals), lowBound=0,
+                                     upBound=gridLimitPerInterval if gridLimitAppliesToExport else None)
     costsEuro = pulp.LpVariable.dicts("costs", range(nrIntervals))
 
     # OBJECTIVE, maximise income minus costs
@@ -1226,6 +1766,13 @@ def LPoptimization():
         # constraint if import from grid is not allowed (but note optimisation might not be possible then)
         if zeroGridCharge:
             prob += importWh[t]==0
+
+    # TERMINAL RESERVE, keep enough charge at the end of the window to cover the gap until
+    # the next refill opportunity. Without it the objective values leftover energy at zero
+    # and sells the battery down to the floor in the final hours.
+    terminalReserveWh=calcTerminalReserveWh()
+    if terminalReserveWh>0 and nrIntervals>0:
+        prob += sockWh[nrIntervals-1] >= terminalReserveWh
 
     # SOLVE, run the solver
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
@@ -1373,6 +1920,12 @@ def processCLarguments():
                 debug=False
                 outputMode=False
             # choose between domoticz integrated or standalone
+            if sys.argv[i+1] in ["-d","-i"] and not useDomoticz:
+                # both modes source their data from Domoticz; refuse rather than silently
+                # falling back, so a stale command line cannot produce a bogus plan
+                print("ERROR: "+sys.argv[i+1]+" needs Domoticz, which is disabled (useDomoticz=False).")
+                print("       Use -s (standalone), or set useDomoticz=True at the top of this file.")
+                raise Exception
             if sys.argv[i+1]=="-d": # domoticz
                 runMode="domoticz"
             if sys.argv[i+1]=="-s": # standalone
@@ -1399,6 +1952,8 @@ def processCLarguments():
             # set whether saldering/netting applies
             if sys.argv[i+1]=="-n": # netting/saldering
                 saldering=True
+                # keep the flag meaning "force it on", overriding the date rule
+                globals()["salderingMode"]="on"
 
             # set planning interval qtr (=15min) or hour
             if sys.argv[i+1]=="-h": # plan with hr avg even if 15 min data available
@@ -1422,7 +1977,9 @@ def processCLarguments():
         print("-u = include expected usage estimate.")
         print("-z = zero charging from grid")
         print("-b = include tax elements in price")
-        print("-n = saldering/netting applicable")
+        print("-n = force saldering/netting on, overriding the date rule")
+        print("     By default saldering is decided per interval: on before "+salderingEndDate+",")
+        print("     off from then. Set BT_SALDERING=auto|on|off to control it directly.")
         print("-h = plan hourly intervals instead of 15 minute")
         print("-m = use Marstek mqtt query to get required start data")
         print("     ")
@@ -1436,7 +1993,7 @@ def main():
     if not processCLarguments():
         quit()
 
-    if runMode=="domoticz" or runMode=="integrated":
+    if useDomoticz and (runMode=="domoticz" or runMode=="integrated"):
         if not getPlanningInput():
             print("ERROR: Something wrong with getting all planning input data.")
             quit() # no point in going further
@@ -1468,6 +2025,18 @@ def main():
 
     while runDate<endDateObject or runDate==startDateObject:
 
+        # skip days the CSV cleaner dropped: carry SOC forward but plan nothing, so the
+        # missing data does not enter the backtest result as a zero-load day
+        # (the set is empty unless BACKTEST_CSV points at a cleaned CSV with a sidecar,
+        #  so this is inert for live/forecast runs)
+        if runDate.date()!=today and datetime.strftime(runDate,'%Y-%m-%d') in backtestExcludedDates():
+            if outputMode or debug: print("Skipping excluded date : ",runDate)
+            runDate=runDate+timedelta(days=1)
+            if runDate<endDateObject:
+                runHour=15
+                writeMode='a'
+            continue
+
         # setting the output variables and getting external data
         if outputMode or debug: print("Processing : ",runDate," from hour ",runHour)
 
@@ -1487,7 +2056,8 @@ def main():
             if debug: input("Enter to continue ... *****************************************************************************************************************************************************************************************************")
 
 
-    if runMode=="domoticz":
+    if useDomoticz and runMode=="domoticz":
+        # writes the planning to a Domoticz text device and pushes the action to the battery
         outputToTextDevice(schedule,starthour,'w',result)
         outputToBattery(schedule,starthour,result)
 
