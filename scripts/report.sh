@@ -5,10 +5,15 @@
 # Sibling of plan.sh, and deliberately a separate task rather than a tail on the planning run:
 # a planning failure must not take the report with it, and vice versa.
 #
-# Timing. Run it at 08:10, not just after midnight. The report scores each interval against
-# the plan in force for it, and the last plan of a day is written at 23:05 - so a run at 00:05
-# would be racing the day it is trying to score. 08:10 also lands after the 08:05 planning
-# run, and the lock below keeps them from overlapping if that one runs long.
+# Timing: 06:10. Not just after midnight - the last plan of a day is written at 23:05 and the
+# report scores each interval against the plan in force for it, so a 00:05 run would be racing
+# the day it is trying to score. By 06:10 yesterday is closed on both sides: every plan for it
+# exists, and the collector has been writing actuals continuously since.
+#
+# 06:10 also sits in the quietest part of the planning schedule - an hour after the 05:05 run,
+# two before the 08:05 one - so the two jobs never contend. An earlier draft chose 08:10 for
+# landing "just after the 08:05 planning run", which had it backwards: that is the slot most
+# likely to overlap, not least. The report should be finished before the user is awake.
 set -eu
 
 # DSM Task Scheduler runs with a minimal PATH; docker lives in /usr/local/bin.
