@@ -55,8 +55,17 @@ measurement: plan
   tag    plan_run   RFC3339 of when the plan was made   <- a new series every run
   _time             the interval planned for
   fields            soc_wh, charge_wh, discharge_wh, import_wh, export_wh, cost_eur,
-                    price_buy, price_sell, pv_forecast_wh, load_forecast_wh, reserve_wh
+                    price_buy, price_sell, pv_forecast_wh, pv_forecast_raw_wh,
+                    load_forecast_wh, reserve_wh
 ```
+
+`pv_forecast_raw_wh` was added on 2026-07-31 and is the same forecast **before**
+`pvElevationCalibration()`, `pvOverallCalibration` and `pvPlanningFactor` are applied. Storing
+only the product makes two different failures indistinguishable — a forecast that was wrong
+and a correction that was wrong call for opposite fixes, and `pvOverallCalibration` (still an
+unfitted 1.00) has to be fitted against the raw number. The raw responses live in `pv_cache/`
+for 48 hours and are then pruned, so a run that does not record this loses the comparison for
+good. One extra field on an existing point: no new series, no cardinality cost.
 
 `reserve_wh` is one number for the whole horizon, not a per-interval decision, and is
 repeated on every point anyway — that lets a dashboard draw it as a line under `soc_wh`
