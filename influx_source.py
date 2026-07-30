@@ -21,15 +21,24 @@ Timestamps: the planner works in Europe/Amsterdam local time. Hourly windows are
 aggregated in UTC and relabelled locally, which is exact because every Amsterdam
 offset is a whole number of hours.
 
-Configuration comes from the environment, falling back to the collector's own .env
-so the token does not need to be copied:
+Configuration is resolved in three steps, first hit wins:
 
-    INFLUX_URL       e.g. http://192.168.178.x:8086   (required)
+    1. the real environment          (docker-compose, plan-now.sh, an export)
+    2. this repo's own .env          (see .env.example; INFLUX_ENV_FILE overrides the path)
+    3. the collector's .env          (../../alphaess-collector/.env, if it is a sibling)
+
+Step 3 is a convenience for a Mac checkout sitting next to alphaess-collector, so the
+token does not have to be copied by hand. It is a RELATIVE path from this file and
+resolves to nothing once the code is at /app in a container - which is why step 2 exists
+and is the one to use anywhere but a dev machine.
+
+    INFLUX_URL       e.g. http://influxdb:8086        (required, or INFLUX_HOST)
+    INFLUX_HOST      host only; INFLUX_PORT defaults to 8086
     INFLUX_TOKEN     API token                        (required)
     INFLUX_ORG       default "home"
     INFLUX_BUCKET    default "alphaess"
     ALPHAESS_SYS_SN  optional; filters to one system
-    INFLUX_ENV_FILE  path to the collector .env, default ../../alphaess-collector/.env
+    INFLUX_ENV_FILE  path to this repo's .env, default alongside this file
 
 Self-test:
 
@@ -55,8 +64,16 @@ FIELD_SOC = "soc_percent"
 FIELD_BATTERY = "battery_power_w"
 FIELD_GRID = "grid_power_w"
 
-DEFAULT_ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "..", "alphaess-collector", ".env")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+# This repo's own .env: the primary place for connection settings, and the only one that
+# travels. Gitignored - see .env.example for the keys.
+DEFAULT_ENV_FILE = os.path.join(_HERE, ".env")
+
+# Fallback for a dev checkout that sits beside alphaess-collector, so the token need not be
+# copied. Relative to THIS FILE, so at /app in a container it resolves to a path that cannot
+# exist; that is expected, and step 1 or 2 above is meant to have supplied the token by then.
+COLLECTOR_ENV_FILE = os.path.join(_HERE, "..", "..", "alphaess-collector", ".env")
 
 _config = None
 
@@ -83,9 +100,14 @@ def config():
     if _config is None:
         env_file = os.environ.get("INFLUX_ENV_FILE", DEFAULT_ENV_FILE)
         fromfile = _read_env_file(env_file)
+        collector = _read_env_file(COLLECTOR_ENV_FILE)
 
         def pick(key, default=""):
-            return os.environ.get(key) or fromfile.get(key, default)
+            # real environment, then this repo's .env, then the collector's. Empty values
+            # fall through rather than winning, so a commented-out or blanked key in one
+            # file does not shadow a real value in the next.
+            return (os.environ.get(key) or fromfile.get(key)
+                    or collector.get(key) or default)
 
         url = pick("INFLUX_URL")
         if not url:
@@ -102,6 +124,7 @@ def config():
             "sys_sn": pick("ALPHAESS_SYS_SN"),
             "poll_seconds": float(pick("POLL_INTERVAL_SECONDS", "30") or 30),
             "env_file": env_file,
+            "collector_env_file": COLLECTOR_ENV_FILE,
         }
     return _config
 
@@ -115,9 +138,17 @@ def _query(flux):
     """POST a Flux query, return parsed rows as dicts. Raises on transport failure."""
     c = config()
     if not configured():
+        # Name what is missing and every place that was searched. The old message mentioned
+        # only INFLUX_ENV_FILE, which pointed at the wrong fix in a container: there the
+        # answer is to pass INFLUX_TOKEN through docker-compose, not to repath a .env.
+        missing = [k for k, v in (("INFLUX_URL (or INFLUX_HOST)", c["url"]),
+                                  ("INFLUX_TOKEN", c["token"])) if not v]
         raise RuntimeError(
-            "InfluxDB is not configured: set INFLUX_URL (host:port) and INFLUX_TOKEN, "
-            "or point INFLUX_ENV_FILE at the alphaess-collector .env (tried %s)" % c["env_file"])
+            "InfluxDB is not configured: missing %s.\n"
+            "  Searched: the environment, then %s, then %s.\n"
+            "  Copy .env.example to .env and fill it in, or set the variables directly "
+            "(in a container, pass them from docker-compose)."
+            % (" and ".join(missing), c["env_file"], c["collector_env_file"]))
     resp = requests.post(
         c["url"] + "/api/v2/query",
         params={"org": c["org"]},

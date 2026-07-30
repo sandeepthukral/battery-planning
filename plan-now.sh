@@ -12,9 +12,20 @@ set -u
 cd "$(dirname "$0")"
 PY=.venv/bin/python
 
-# the collector's .env carries the token but only the InfluxDB port, since the collector
-# reaches InfluxDB over the docker network. Standalone we need a routable host.
-export INFLUX_HOST=${INFLUX_HOST:-192.168.68.105}
+# Where to reach InfluxDB. Two environments, and the difference is not cosmetic:
+#
+#   container on the NAS : INFLUX_URL=http://influxdb:8086 comes from docker-compose. The
+#                          service name resolves on the shared docker network; the LAN IP
+#                          would mean hairpinning out of the container and back into the
+#                          same box, which is at best fragile and at worst blocked.
+#   laptop on the LAN    : nothing is set, so fall back to the NAS address below.
+#
+# Only default INFLUX_HOST when INFLUX_URL is absent. influx_source.config() prefers URL
+# over HOST anyway, so setting both is merely confusing today - but it is the kind of
+# confusion that survives until someone reorders those two lines.
+if [ -z "${INFLUX_URL:-}" ]; then
+  export INFLUX_HOST=${INFLUX_HOST:-192.168.68.105}
+fi
 
 today=$(date +%Y%m%d)
 tomorrow=$(date -v+1d +%Y%m%d)

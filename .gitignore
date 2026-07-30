@@ -1,4 +1,5 @@
 .venv/
+.env
 price_cache/
 results/
 entsoe-output*.txt
