@@ -76,9 +76,18 @@ token with four narrowly-scoped ones; that is the name ours has on its side. `in
 reads either `INFLUX_TOKEN_PLANNING` or `INFLUX_TOKEN`, preferring the specific name within a
 given source, so the value can be copied across without being renamed on the way.
 
-The preference matters for the sibling-checkout fallback on the Mac: the collector's `.env`
-may hold both, and taking its `INFLUX_TOKEN` there would quietly reach for an admin token
-while the correctly-scoped one sat beside it.
+**The sibling-checkout fallback is gone.** `influx_source.py` used to read
+`../../alphaess-collector/.env` as a third resolution step, so a Mac checkout beside that
+repo needed no token of its own. Removed on 2026-07-30: this repo has no business reading
+another one's private file, the relative path was a guess about directory layout that held
+on exactly one machine, and the coupling was silent in the way that matters — after the
+token split it would have handed back the **admin** token while the correctly-scoped one sat
+beside it. It was doing precisely that, unnoticed, until the fallback was removed and the
+Mac's own `.env` turned out to hold nothing but `KNMI_API_KEY`.
+
+It was also quietly supplying `ALPHAESS_SYS_SN`, so removing it widened the system filter to
+`<all>` until that key was written into this repo's `.env` too. Resolution is now two steps:
+the real environment, then this repo's `.env`.
 
 The planner reads from `alphaess` on every single run:
 
@@ -271,16 +280,19 @@ for consistency if it goes in the image at all; do not schedule it. Once plans a
 cannot exist, `_read_env_file()` swallows the miss (`except OSError: pass`), and the run dies
 at `BT_INITCHARGE=influx` with a message pointing at `INFLUX_ENV_FILE` — the wrong fix.
 
-`config()` now resolves each key through three sources, first non-empty wins:
+`config()` now resolves each key through two sources, first non-empty wins:
 
 | # | source | who uses it |
 |---|---|---|
 | 1 | the real environment | docker-compose on the NAS, `plan-now.sh`, a manual export |
 | 2 | **this repo's `.env`** | the portable answer; documented in `.env.example` |
-| 3 | `../../alphaess-collector/.env` | dev convenience on the Mac — no token copied by hand |
 
-Step 3 stays only so a Mac checkout keeps working untouched; it is expected to resolve to
-nothing anywhere else. `.env.example` **is committed** and lists every key with both the
+An interim version kept the collector's `.env` as a third step, so the Mac needed no token of
+its own. **Dropped 2026-07-30** — see "Token" in the cross-repo contract for why. Every
+machine now needs its own `.env`, the dev Mac included; that is a one-line cost and it removes
+a dependency on where two unrelated repos happen to sit on disk.
+
+`.env.example` **is committed** and lists every key with both the
 `INFLUX_URL=http://influxdb:8086` container form and the `INFLUX_HOST=` LAN form.
 
 The failure message now names what is missing and every path searched, and says to pass the
@@ -289,7 +301,7 @@ variables from docker-compose when in a container:
 ```
 InfluxDB is not configured: missing INFLUX_URL (or INFLUX_HOST) and INFLUX_TOKEN (or
   INFLUX_TOKEN_PLANNING).
-  Searched: the environment, then /nonexistent/.env, then /app/../../alphaess-collector/.env.
+  Searched: the environment, then /nonexistent/.env.
   Copy .env.example to .env and fill it in, or set the variables directly (in a
   container, pass them from docker-compose).
 ```
