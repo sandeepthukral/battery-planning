@@ -34,6 +34,7 @@ shipped. No `coinor-cbc` package, no solver path override. (This was worth check
 | Output | **Grafana panel**, fed by plan storage. Text plans/logs still written, as a byproduct |
 | macOS | `run-matrix.sh` stays zsh/macOS — it is a backtest harness over a fixed past year, it does not move |
 | Execution | Still **none**. Advice only. Nothing is sent to the battery |
+| Looking back | A **day-after report** comparing yesterday's plans against what actually happened — money, outcomes and solar-forecast accuracy, reported separately. Wanted, not built; see [section 6](#6-the-day-after-report-plan-vs-what-actually-happened--not-built-wanted) |
 
 ---
 
@@ -838,6 +839,90 @@ The provisioning provider already picks up anything in `/var/lib/grafana/dashboa
 
 ---
 
+## 6. The day-after report: plan vs what actually happened — **not built, wanted**
+
+Sections 1–5 get plans made and shown. This is the one that says whether they were any
+good. Deliberately scheduled after them, because it cannot start until the `planning` bucket
+holds real days.
+
+### What it answers
+
+Three separate questions, and they should stay separate in the output — they fail
+independently and mixing them hides which one went wrong.
+
+1. **How did the day go, against what was advised?** The battery is not executing the plan.
+   Nothing is: this is an advisory planner by design, and the AlphaESS runs its own
+   self-consumption logic. So the honest framing is *what the optimiser advised* versus
+   *what the house and battery actually did* — in euros, at the prices that actually applied.
+   The gap is the answer to "is this planner worth acting on", which is the whole reason the
+   project exists.
+2. **How close were the outcomes?** SoC trajectory planned vs measured, and grid import/export
+   planned vs measured. This is a different question from the money one — a plan can be right
+   about the shape of the day and wrong about its value, or the reverse.
+3. **How good was the solar forecast?** `pv_forecast_wh` against measured PV. Daily total
+   error *and* error by hour of day, because the one miss observed so far (2026-07-29, 43%
+   under) was concentrated in the evening rather than spread across the day. A daily total
+   alone would have hidden that.
+
+### Which plan to judge
+
+Not one plan per day. Eight run each day, and holding the 02:05 plan responsible for the
+whole day judges it on prices it could not see — tomorrow's day-ahead is not published until
+~13:00.
+
+**Compare each interval against the plan that was in force for it**: for interval *t*, the
+most recent `plan_run` at or before *t*. That is what a person acting on the advice would
+have been following. The 02:05 plan's own forward view can still be scored separately as a
+"how far ahead does this stay right" question, but it is a second report, not this one.
+
+### Data
+
+Everything needed will already be there, which is the point of doing section 4 first.
+
+| what | where |
+|---|---|
+| planned SoC, charge, discharge, import, export, prices, PV and load forecast | `planning` bucket, measurement `plan`, tagged `plan_run` |
+| actual SoC, PV, load, grid | `alphaess` bucket, `power_readings`, via the existing `hourlyEnergyWh()` |
+| prices that actually applied | already stored on every plan point as `price_buy` / `price_sell` — no refetch, and no risk of a later price revision changing a past verdict |
+
+No new source, no new credential. The scoped token already reads `alphaess` and writes
+`planning`.
+
+### Shape
+
+A script in this repo — `report_day.py`, run for a date, defaulting to yesterday. Text
+output first, in the register `advise.py` already uses: blocks a person can read, not a CSV.
+A Grafana panel can come after, and should reuse the same numbers rather than recompute them
+in Flux, so the two cannot disagree.
+
+Worth writing the per-interval comparison back into `planning` under its own measurement
+(`plan_score` or similar) so the panel is a query rather than a file read, and so a run of
+bad days is visible as a trend instead of as eight text files.
+
+### Known difficulties, stated now rather than discovered later
+
+- **Attribution.** When the actual outcome beats the plan, it may be because the plan was
+  wrong, or because the forecast it was built on was wrong. Reporting the PV forecast error
+  beside the money gap is what makes that separable — a bad-money day with a good forecast is
+  a planner problem; both bad is a forecast problem.
+- **Nothing followed the plan**, so early reports measure the distance between AlphaESS's
+  built-in behaviour and the optimiser, not the planner's execution accuracy. That is still
+  the useful number, but the report must say which it is rather than implying the plan was
+  attempted.
+- **Saldering changes the arithmetic on 1 Jan 2027.** The scoring has to use
+  `salderingApplies()` per interval, exactly as the planner does, or reports spanning the
+  boundary will silently value exports wrongly.
+- **A day with a gap in the actuals** — collector outage — must be reported as incomplete, not
+  scored as a very quiet house. `hourlyEnergyWh()`'s existing `min_coverage` check already
+  draws that line; the report needs to surface it rather than swallow it.
+
+### Prerequisite
+
+At least a few complete days in the `planning` bucket, i.e. section 4 running unattended on
+the NAS. Until then there is nothing to compare against.
+
+---
+
 ## Verification
 
 | step | check |
@@ -848,6 +933,7 @@ The provisioning provider already picks up anything in `/var/lib/grafana/dashboa
 | 3 | Trigger the DSM task by hand; confirm a plan appears with the right local timestamp. Then let one scheduled run fire unattended and read the log |
 | 4 | **Done on the Mac** (124 intervals × 11 fields, one tag; terminal SoC = `reserve_wh`). Still to check on the NAS: two runs within one hour leave two distinct `plan_run` tags, neither overwriting the other |
 | 5 | Panel shows the current plan, and after a few hours the actual SoC line visibly diverging from it |
+| 6 | Run the report for a day whose plans are already stored and check the euro figures by hand against the plan text file for the same day. Then run it for a date with **no** stored plan and confirm it says so rather than reporting a zero gap |
 | regression | The Domoticz guard must still report **0 calls attempted** — now from inside the container |
 
 ---
@@ -856,16 +942,20 @@ The provisioning provider already picks up anything in `/var/lib/grafana/dashboa
 
 ```
 1 (portability)  ->  2 (container)  ->  3 (DSM schedule)  ->  4 (store plans)  ->  5 (Grafana)
+                                                                                      |
+                                                                       6 (day-after report)
 ```
 
-Step 1 is entirely local to this repo and can start immediately — it does not wait on the
-collector reorg. Steps 2–5 all touch the other repo's network, bucket, token, or Grafana.
+Steps **1–4 are done**. Step 5 is the next piece of work: plans are being made every 3 hours
+and stored, and nothing yet shows them.
 
-**Before any of this can be deployed, this repo has to be pushed.** The move to the NAS is a
-`git clone`, so anything uncommitted does not exist as far as the NAS is concerned. The
-branch `nas-planner-and-grid-limits` carries the planner work; a later round of changes
-(price-cache fix, `advise.py --min-hours`, README/`docs/PLAN.md`, `solar-forecast.sh`) still
-needs committing on top.
+Step 6 needs no code from step 5 — it reads the same bucket — but is placed after it because
+it also needs *days* in that bucket, which only accumulate once 4 has been running
+unattended. It is the first item here that answers "is any of this worth acting on", so it
+should not drift indefinitely: a week of stored plans is enough to start.
+
+Steps 5 and 6 both touch the other repo's Grafana; 6 additionally reuses the `alphaess`
+bucket for actuals, which the existing token already reads.
 
 ## Still open, unrelated to the move
 
