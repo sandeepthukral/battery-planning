@@ -280,11 +280,40 @@ def latestSocPercent(within_minutes=30):
         return None
 
 
-def hourlyEnergyWh(field, start, stop, min_coverage=0.5, clamp_negative=False):
-    """Hourly energy in Wh for a power field, keyed "YYYY-MM-DD HH" in local time.
+def _rangeClause(start, stop):
+    return '|> range(start: %s, stop: %s)' % (
+        start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        stop.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    start/stop are aware datetimes. Hours whose sample coverage falls below
-    min_coverage are omitted rather than reported as a low hour.
+
+def _windowStarts(rows, minutes):
+    """Relabel aggregateWindow output by window START, in local time.
+
+    aggregateWindow stamps each window with its END. Everything in this project labels a
+    period by when it begins, so step back one window width.
+    """
+    out = {}
+    for row in rows:
+        try:
+            ts, value = row["_time"], float(row["_value"])
+        except (KeyError, ValueError):
+            continue
+        out[(_parse_time(ts) - timedelta(minutes=minutes)).astimezone(LOCAL_TZ or timezone.utc)] = value
+    return out
+
+
+def intervalEnergyWh(field, start, stop, minutes=60, min_coverage=0.5, clamp_negative=False):
+    """Energy in Wh per interval, keyed by interval start as an aware local datetime.
+
+    start/stop are aware datetimes. Intervals whose sample coverage falls below
+    min_coverage are omitted rather than reported as a quiet one - a collector outage and
+    an empty house look identical in the mean, and only the count tells them apart.
+
+    minutes exists because plans are quarter-hourly (NL day-ahead moved to a 15-minute MTU)
+    while this function was originally hourly. Comparing a plan against actuals at hourly
+    resolution would average away exactly the short price spikes the planner is built to
+    catch. Windows align to the epoch in UTC, which lands on local quarters and hours too,
+    because every Amsterdam offset is a whole number of hours.
 
     clamp_negative floors samples at zero before averaging. Use it for load and PV,
     which cannot physically be negative but do occasionally report so during fast
@@ -292,38 +321,79 @@ def hourlyEnergyWh(field, start, stop, min_coverage=0.5, clamp_negative=False):
     grid_power_w, where the sign carries the direction of flow.
     """
     c = config()
-    rng = '|> range(start: %s, stop: %s)' % (
-        start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        stop.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     base = 'from(bucket: "%s")\n  %s\n  |> filter(fn: (r) => r._measurement == "%s" and r._field == "%s")%s' % (
-        c["bucket"], rng, MEASUREMENT, field, _sys_filter())
+        c["bucket"], _rangeClause(start, stop), MEASUREMENT, field, _sys_filter())
     if clamp_negative:
         base += '\n  |> map(fn: (r) => ({r with _value: if r._value < 0.0 then 0.0 else r._value}))'
 
-    means = _query(base + '\n  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)')
-    counts = _query(base + '\n  |> aggregateWindow(every: 1h, fn: count, createEmpty: false)')
+    every = "%dm" % int(minutes)
+    means = _windowStarts(_query(base + '\n  |> aggregateWindow(every: %s, fn: mean, createEmpty: false)' % every), minutes)
+    counts = _windowStarts(_query(base + '\n  |> aggregateWindow(every: %s, fn: count, createEmpty: false)' % every), minutes)
 
-    expected = 3600.0 / c["poll_seconds"] if c["poll_seconds"] else 120.0
-    seen = {}
-    for row in counts:
-        try:
-            seen[row["_time"]] = float(row["_value"])
-        except (KeyError, ValueError):
-            continue
+    expected = (minutes * 60.0) / c["poll_seconds"] if c["poll_seconds"] else minutes * 2.0
+    return {t: watts * minutes / 60.0            # mean W over the window -> Wh
+            for t, watts in means.items()
+            if counts.get(t, 0.0) / expected >= min_coverage}
 
-    out = {}
-    for row in means:
-        try:
-            ts, watts = row["_time"], float(row["_value"])
-        except (KeyError, ValueError):
+
+def intervalLastValue(field, start, stop, minutes=60):
+    """Last sample of a field in each interval, keyed by interval start (aware local).
+
+    For state fields - soc_percent - where the value at the end of an interval is the
+    meaningful one and averaging would blur a trajectory. Matches how the planner reports
+    SoC: its schedule records the level reached at the end of each interval.
+    """
+    c = config()
+    base = 'from(bucket: "%s")\n  %s\n  |> filter(fn: (r) => r._measurement == "%s" and r._field == "%s")%s' % (
+        c["bucket"], _rangeClause(start, stop), MEASUREMENT, field, _sys_filter())
+    return _windowStarts(
+        _query(base + '\n  |> aggregateWindow(every: %dm, fn: last, createEmpty: false)' % int(minutes)),
+        minutes)
+
+
+def planPoints(start, stop, measurement="plan"):
+    """Stored plan intervals starting in [start, stop), one dict per point.
+
+    Every run writes a full horizon, so an interval is normally covered by several plans -
+    the 02:05 run and the 14:05 run both have an opinion about 18:00. They are all returned,
+    each carrying its plan_run tag; deciding which one was in force is the caller's job.
+
+    Returns [{"plan_run": str, "time": aware local datetime, "soc_wh": float, ...}].
+
+    Also reads measurements in this bucket that carry no plan_run at all - plan_score is
+    one series, deliberately untagged - in which case plan_run comes back empty.
+    """
+    c = config()
+    flux = '''from(bucket: "%s")
+  %s
+  |> filter(fn: (r) => r._measurement == "%s")
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")''' % (
+        c["plan_bucket"], _rangeClause(start, stop), measurement)
+    out = []
+    for row in _query(flux):
+        if not row.get("_time"):
             continue
-        if seen.get(ts, 0.0) / expected < min_coverage:
-            continue
-        # aggregateWindow stamps a window with its END; the planner labels hours by
-        # their START, so step back one hour before relabelling
-        local = (_parse_time(ts) - timedelta(hours=1)).astimezone(LOCAL_TZ)
-        out[local.strftime("%Y-%m-%d %H")] = watts      # mean W over 1h == Wh
+        point = {"plan_run": row.get("plan_run") or "",
+                 "time": _parse_time(row["_time"]).astimezone(LOCAL_TZ or timezone.utc)}
+        for key, value in row.items():
+            if key in ("result", "table", "_time", "_start", "_stop", "_measurement", "plan_run"):
+                continue
+            try:
+                point[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        out.append(point)
     return out
+
+
+def hourlyEnergyWh(field, start, stop, min_coverage=0.5, clamp_negative=False):
+    """Hourly energy in Wh for a power field, keyed "YYYY-MM-DD HH" in local time.
+
+    The string-keyed hourly view kept for callers that shape data for the planner. New code
+    wanting another resolution, or datetime keys, should call intervalEnergyWh directly.
+    """
+    hours = intervalEnergyWh(field, start, stop, 60, min_coverage, clamp_negative)
+    return {t.strftime("%Y-%m-%d %H"): v for t, v in hours.items()}
 
 
 def hourlyAvgProfileWh(field=FIELD_LOAD, days=7, weightIncrease=0.0):
