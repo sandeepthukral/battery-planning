@@ -635,11 +635,37 @@ The Sparky export carries the meter EAN, the meter number and the service addres
 never enter the repo — hence the absolute path default in `p1_to_backtest_csv.py`, overridable
 with `P1_CSV`.
 
-**Copied to the NAS 2026-07-30**, to `/volume1/docker/battery-archive/`, and verified: an
-md5 of every file's md5, sorted, matches on both sides — `4f73c759a2262f6e3d7b50ee93abff12`
-across all 16,704 files. Mounted into the container **read-only** at `/archive`, with
-`P1_CSV` pointed at it. Read-only because the one dataset that cannot be recreated should not
-be writable by the thing most likely to have a bug in it.
+**Copied to the NAS 2026-07-30**, to
+**`/volume1/documents/battery-archive/battery-archive-20260730/`**. Mounted into the container
+**read-only** at `/archive`, with `P1_CSV` pointed at it. Read-only because the one dataset
+that cannot be recreated should not be writable by the thing most likely to have a bug in it.
+
+**Correction, 2026-07-31: there were two copies on the NAS, and the container was mounting the
+wrong one.** `/volume1/docker/battery-archive/` is an earlier copy from 29 July, and this
+document recorded it as verified — an md5 of every file's md5, sorted, matching on both sides
+at `4f73c759a2262f6e3d7b50ee93abff12` across 16,704 files. Whatever that number described, it
+is not that directory today:
+
+| | `/volume1/docker/battery-archive` | `/volume1/documents/…/battery-archive-20260730` |
+|---|---|---|
+| S3Export files | **16,693** | 16,700 (matches the Mac) |
+| AppleDouble `._*` | **21,069** | 1 |
+| size | 215 MB | 132 MB |
+| `sha256sum -c MANIFEST.sha256` | no manifest | 11/11 OK |
+
+So the mounted copy was **short 7 files** and carried 21,069 macOS xattr sidecars — the
+signature of a Finder/SMB copy, not of the `tar` command written down below, which excludes
+`._*`. It is also inside `/volume1/docker/`, the one place this plan says the archive must
+never live, because a stack rebuild can reach it.
+
+`docker-compose.yml` now mounts the `documents` copy, via `ARCHIVE_DIR` so the next dated
+archive is a `.env` line rather than an edit. **The `/volume1/docker/battery-archive` copy
+should be deleted** once the mount change is deployed — it is 215 MB of a strictly worse copy
+of data that exists complete twice elsewhere.
+
+The lesson is narrow and worth keeping: *a checksum recorded in a document proves nothing
+about a directory later.* Both copies looked fine from a listing. Only counting files against
+the source found the gap.
 
 It sits beside `battery-planning/`, never inside it: a child of the checkout is one
 `.gitignore` slip away from a public fork.
@@ -650,7 +676,8 @@ be re-measured by waiting.
 
 **The NAS copy is still not a backup.** SHR/RAID 1 survives a disk dying; it does not survive
 fire, theft, ransomware, or an accidental delete, which RAID mirrors faithfully. There is no
-Hyper Backup job. The 6.7 MB core (everything but `S3Export/`) is small enough to go anywhere;
+Hyper Backup job. The NAS copy is the **whole** export including `S3Export/` (132 MB); the
+6.7 MB core (everything but `S3Export/`) is the subset small enough to go anywhere;
 **Google Drive is the chosen third copy** (2026-07-30). A private GitHub repo was the earlier
 suggestion and would also work, but Drive needs no repo hygiene for a dataset that is never
 edited. The Drive copy is `battery-archive-20260730-nopii.tar.gz` (986 KB, sha256
@@ -721,7 +748,7 @@ the files are tiny, and rsync pays a round trip per file where tar sends one str
 ```sh
 cd ~/Personal/battery-data
 tar cf - --exclude '.DS_Store' --exclude '._*' . \
-  | ssh data42 'cd /volume1/docker/battery-archive && tar xf -'
+  | ssh data42 'cd /volume1/documents/battery-archive/battery-archive-20260730 && tar xf -'
 ```
 
 No `z`: `S3Export/` is already gzipped.
