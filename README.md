@@ -31,7 +31,7 @@ Live path: `solar-forecast.sh` → `plan-now.sh` → `Marstek-planning.py` → `
 `report_day.py` closing the loop the next day.
 Backtest path: `clean_backtest_csv.py` / `influx_to_backtest_csv.py` / `p1_to_backtest_csv.py` → `run-matrix.sh` → `Marstek-planning.py` (run 8×).
 
-Deeper detail lives in `docs/PLAN.md` (plan file column format) and `NAS-DEPLOYMENT-PLAN.md` (moving the live path onto always-on hardware).
+Deeper detail lives in `docs/PLAN.md` (plan file column format) and `NAS-DEPLOYMENT-PLAN.md` (moving the live path onto always-on hardware). `TODO.md` is what is left to do, split into work, things waiting on time, and things deferred on purpose.
 
 # Main Purpose
 
