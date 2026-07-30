@@ -53,9 +53,13 @@ shape the actuals do not:
 measurement: plan
   tag    plan_run   RFC3339 of when the plan was made   <- a new series every run
   _time             the interval planned for
-  fields            soc_wh, charge_wh, discharge_wh, import_wh, export_wh,
+  fields            soc_wh, charge_wh, discharge_wh, import_wh, export_wh, cost_eur,
                     price_buy, price_sell, pv_forecast_wh, load_forecast_wh, reserve_wh
 ```
+
+`reserve_wh` is one number for the whole horizon, not a per-interval decision, and is
+repeated on every point anyway — that lets a dashboard draw it as a line under `soc_wh`
+without a second query and a join.
 
 `plan_run` has to be a tag, because Grafana must filter on "the current plan". That means
 **8 new series/day → ~2,900/year → ~29k series/year across 10 fields, growing forever**, on
@@ -758,18 +762,42 @@ was written but never loaded, so there is nothing to unload — just remove the 
 
 ---
 
-## 4. Write every plan into InfluxDB
+## 4. Write every plan into InfluxDB — **DONE**
 
 *(This was Phase 3 of the older plan; it lands here because it only becomes natural once the
 planner is on `alphaess-net`.)*
 
-Add `influx_source.writePoints()` over `/api/v2/write` in line protocol, reusing `config()`
-— no new dependency, and the token permits it. Call it after the solve.
+`influx_source.linePoint()` builds one line-protocol record and `writePoints()` POSTs them to
+`/api/v2/write`, reusing `config()` — no new dependency. `writePlanToInflux()` in
+`Marstek-planning.py` is called from the main loop after the solve.
 
-Schema as given in [the contract](#bucket-planning) above.
+Schema as given in [the contract](#bucket-planning) above, plus `cost_eur` — the optimiser
+already produces it per interval and it is what makes a stored plan checkable against its own
+arithmetic afterwards.
 
-Set the **~400-day retention on `planning`** at the same time, not later. The tag grows
-without bound and nobody will be watching.
+Three things worth knowing about the implementation:
+
+- **Live runs only.** The main loop walks a date range; a backtest sweeps a year of it. The
+  call is guarded by `runDate.date()==today`, so hundreds of replayed days cannot land in the
+  bucket under one `plan_run` stamp. `BT_WRITE_PLAN=N` turns it off entirely.
+- **Non-fatal.** By the time it runs, the plan is already printed and on disk. A failed write
+  warns and says the plan is unaffected. The alternative — dying at the last step because a
+  service is down — loses the advice to save the dashboard, which is backwards.
+- **Every field is a float**, including whole watt-hours. InfluxDB pins a field's type on
+  first write and rejects a later disagreement, so a value that is `0` on a dull day and
+  `0.5` on a bright one would break the series. One type everywhere cannot collide.
+- **Timestamps come from `priceList[nr][2]`, the UTC start**, not the local string beside it.
+  The local one repeats itself on the October DST night.
+
+The **400-day retention on `planning`** is already set — verified on the NAS 2026-07-30,
+`everySeconds: 34560000`. Nothing to do.
+
+**Verified end to end**, 2026-07-30 17:26 from the Mac against the live NAS InfluxDB: 124
+intervals × 11 fields under a single `plan_run` tag; horizon Thu 17:00 → Fri 23:45 matching
+the printed advice; terminal SoC exactly 5,635 Wh against `reserve_wh` 5,635 — the reserve
+constraint is visible as a binding one in the stored data. `BT_WRITE_PLAN=N` re-run produced
+a plan and no second `plan_run`. The November 2025 backtest is byte-identical before and
+after the change, and attempts no write.
 
 ### `pv_forecast_wh` earns its place — record it from day one
 
@@ -818,7 +846,7 @@ The provisioning provider already picks up anything in `/var/lib/grafana/dashboa
 | 2 | `docker compose build` succeeds and the CBC smoke test passes. First `docker compose run --rm planner` produces a plan, and `data/pv_cache/` + `data/plans/` contain new files afterwards — this is what proves the mount is writable, which is the silent-failure case |
 | TZ | Run the container at 13:30 and 14:30 local; confirm the 14:30 run reports the **longer** horizon. This is the bug that would otherwise hide indefinitely |
 | 3 | Trigger the DSM task by hand; confirm a plan appears with the right local timestamp. Then let one scheduled run fire unattended and read the log |
-| 4 | Run twice within an hour; confirm two distinct `plan_run` tags coexist and neither overwrites the other |
+| 4 | **Done on the Mac** (124 intervals × 11 fields, one tag; terminal SoC = `reserve_wh`). Still to check on the NAS: two runs within one hour leave two distinct `plan_run` tags, neither overwriting the other |
 | 5 | Panel shows the current plan, and after a few hours the actual SoC line visibly diverging from it |
 | regression | The Domoticz guard must still report **0 calls attempted** — now from inside the container |
 
