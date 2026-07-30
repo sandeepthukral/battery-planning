@@ -849,6 +849,53 @@ against a shared public IP with a ~12/hour budget.
 Unloaded 2026-07-30. Verify with `launchctl list | grep battery-planner` — no output is
 correct.
 
+### The second task: `scripts/report.sh`, daily
+
+A separate DSM task rather than a tail on the planning run, so a planning failure cannot take
+the report with it or the reverse. Same shape as `plan.sh` — its own PATH line, its own lock
+directory, its own stale-lock timeout (30 minutes here; the report is a handful of queries).
+
+- **General**: user `root`
+- **Schedule**: Daily, **08:10**, no repeat
+- **Task Settings → Run command**: `/volume1/docker/battery-planning/scripts/report.sh`
+
+**08:10, not 00:05.** The last plan of a day is written at 23:05, and the report scores each
+interval against the plan in force for it — a run just after midnight would be racing the day
+it is trying to score. 08:10 also lands just after the 08:05 planning run, and the two locks
+are separate so they cannot deadlock if that one runs long.
+
+The date is computed in the script with `TZ=Europe/Amsterdam` and passed to `report_day.py`
+explicitly, rather than letting the container resolve "yesterday" on its own. The output file
+is named from the same variable, so the filename and the report can never disagree about which
+day they describe. An argument re-runs a past day:
+
+```sh
+sudo /volume1/docker/battery-planning/scripts/report.sh 2026-07-31
+```
+
+Output lands in `data/reports/report_YYYYMMDD.txt`, written to a temporary name and moved into
+place only when the run finishes, so a half-written report is never mistaken for a complete
+one. `--write` stores the per-interval comparison as `plan_score` at the same time.
+
+Exit 1 means no plans were stored for that day — a day the planner did not run. That belongs
+in the task log rather than being swallowed, so it is passed through rather than mapped to 0.
+
+### A trap that cost a round trip: `sudo` loses the PATH
+
+`sudo docker compose build` on the NAS fails with `sudo: docker: command not found`. DSM keeps
+docker at `/usr/local/bin/docker`, and `sudo` replaces `PATH` with a `secure_path` that does
+not include `/usr/local/bin`. By hand, use the absolute path:
+
+```sh
+ssh -t data42 'cd /volume1/docker/battery-planning && sudo /usr/local/bin/docker compose build'
+```
+
+`git` is at `/usr/local/bin/git` and hits the same thing over a non-interactive SSH, which
+needs `export PATH=/usr/local/bin:$PATH` first. Neither affects the scheduled tasks: DSM runs
+them **as** root, so there is no `sudo` and no `secure_path`, and both scripts set their own
+PATH. This is precisely the difference between the by-hand path and the scheduled one, and it
+is why testing by hand can fail while the schedule works.
+
 ---
 
 ## 4. Write every plan into InfluxDB — **DONE**
