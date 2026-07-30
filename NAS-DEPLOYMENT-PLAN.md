@@ -1,6 +1,6 @@
 # Moving the planner to the NAS
 
-Status: **planned, not started.** Written 2026-07-28.
+Status: **planned, not started.** Written 2026-07-28, revised 2026-07-30.
 
 Blocked on the `alphaess-collector` repo finishing its reorganisation — that side owns the
 InfluxDB, the Grafana, and the docker network this plan attaches to. See
@@ -113,21 +113,51 @@ than a loud one.**
 |---|---|---|
 | 1 | `#!/bin/zsh` | `#!/bin/bash` — `python:3.12-slim` has no zsh |
 | 20 | `date -v+1d` | `date -d tomorrow` — **BSD-only flag** |
-| 29, 54, 61 | `print` | `printf` — zsh builtin, absent in bash |
+| 29, 65, 72, 81 | `print` | `printf` — zsh builtin, absent in bash |
 | 13 | `PY=.venv/bin/python` | `python` — the checked-in `.venv` is a darwin build and must never enter the image |
+| ~~17~~ | ~~`INFLUX_HOST=192.168.68.105`~~ | **DONE** — now only defaults when `INFLUX_URL` is unset, so compose wins in the container and the LAN address still works on the Mac |
+| ~~79~~ | ~~`$pipestatus[1]`~~ | **DONE** — pipeline removed entirely, see below |
 
 The `date` one is the dangerous one. On Linux it fails to an **empty** `BT_END`, and an
 empty env var falls straight through `_ask()` into `input()` — see next item.
 
-### 1.2 `_ask()` must refuse to prompt when there is no terminal
+**The `pipestatus` trap, recorded because the fix is not the obvious one.** zsh's array is
+1-indexed, bash's is 0-indexed:
 
-`Marstek-planning.py:359` returns `input(prompt)` whenever the env var is missing **or
-empty**. In a scheduled container that either raises a bare `EOFError` traceback or blocks
-forever with nothing reporting it.
+```
+zsh    ${pipestatus[1]}      bash   ${PIPESTATUS[0]}
+```
 
-Add an `isatty()` guard that raises a named error instead. This converts every future
-empty-variable bug from a hang into a message — the same class of fix as the fail-loudly PV
-guard and the `BT_INITCHARGE=influx` refusal already in place.
+Same concept, same spelling but for case, *different index*. Porting this file by
+mechanically lowercasing `pipestatus` gives `${PIPESTATUS[1]}` — the exit status of `tee`,
+which is always 0. Measured:
+
+```
+zsh :  $? = 0 (tee)   pipestatus[1] = 1
+bash:  PIPESTATUS[0] = 1     PIPESTATUS[1] = 0   <- the naive port
+```
+
+The horizon guard would then be present, compiled, tested and **dead**: a starved price fetch
+would print `ERROR:` and the run would still exit 0.
+
+Shell detection (`if [ -n "$ZSH_VERSION" ]`) works and was considered. Rejected — it keeps a
+silent-failure mode alive to solve a problem that vanishes with the pipe. `plan-now.sh` now
+captures the output, keeps `$?` directly, and prints afterwards. `advise.py` emits a few lines
+instantly, so nothing needs streaming. Verified identical under zsh, bash and dash.
+
+### 1.2 `_ask()` must not prompt when there is no terminal — **DONE** (`56ed33d`)
+
+`_ask()` used to call `input(prompt)` whenever the env var was missing **or** empty. In a
+scheduled container that raises a bare `EOFError` at best and blocks forever at worst.
+
+Now three branches: a set, non-empty variable wins; a variable that is **set but empty**
+warns and takes the default (the `date -v+1d` case in 1.1, so a broken caller says so
+instead of hiding behind a plausible plan); and with no terminal (`sys.stdin.isatty()` false)
+it takes the default silently. That last branch is what makes the constants at the top of
+`Marstek-planning.py` the single source of truth for unattended runs.
+
+Verified on the live path and across a full-year backtest: defaults, explicit overrides and
+an empty `BT_CAP=` all produce the expected plan, and no run hangs.
 
 ### 1.3 Timezone
 
@@ -166,6 +196,88 @@ unused, so it has to be installed.
 `forecast.solar` `:924`, ENTSOE `:979`, EnergyZero `:1172` — all three `requests.get` calls
 are currently unbounded. A scheduled job that hangs forever is worse than one that fails,
 because nothing surfaces it.
+
+### 1.6 `solar-forecast.sh` has the same problems
+
+Added after this section was first written. `#!/bin/zsh`, `print` on lines 17 and 27. It
+wraps `plan-now.sh` and summarises the PV forecast by hour.
+
+It is a **convenience script for the Mac**, not part of the scheduled path — it forces a full
+replan just to print a forecast, which on a 3-hourly schedule is wasted API budget. Port it
+for consistency if it goes in the image at all; do not schedule it. Once plans are stored
+(section 4) the same numbers come out of InfluxDB without replanning.
+
+---
+
+## 1b. Configuration that is not in the repo
+
+**This is the part a `git clone` cannot give you, and none of it fails loudly.**
+
+### The InfluxDB token — **RESOLVED**
+
+`influx_source.py` used to read its config from exactly one place: `../../alphaess-collector/.env`,
+**relative to itself**. That resolves on the Mac only because both repos sit under
+`battery-smart-control-projects/`. From `/app` in a container it resolves to a path that
+cannot exist, `_read_env_file()` swallows the miss (`except OSError: pass`), and the run dies
+at `BT_INITCHARGE=influx` with a message pointing at `INFLUX_ENV_FILE` — the wrong fix.
+
+`config()` now resolves each key through three sources, first non-empty wins:
+
+| # | source | who uses it |
+|---|---|---|
+| 1 | the real environment | docker-compose on the NAS, `plan-now.sh`, a manual export |
+| 2 | **this repo's `.env`** | the portable answer; documented in `.env.example` |
+| 3 | `../../alphaess-collector/.env` | dev convenience on the Mac — no token copied by hand |
+
+Step 3 stays only so a Mac checkout keeps working untouched; it is expected to resolve to
+nothing anywhere else. `.env.example` **is committed** and lists every key with both the
+`INFLUX_URL=http://influxdb:8086` container form and the `INFLUX_HOST=` LAN form.
+
+The failure message now names what is missing and every path searched, and says to pass the
+variables from docker-compose when in a container:
+
+```
+InfluxDB is not configured: missing INFLUX_URL (or INFLUX_HOST) and INFLUX_TOKEN.
+  Searched: the environment, then /nonexistent/.env, then /app/../../alphaess-collector/.env.
+  Copy .env.example to .env and fill it in, or set the variables directly (in a
+  container, pass them from docker-compose).
+```
+
+**At deployment:** `cp .env.example .env` on the NAS and fill in `INFLUX_TOKEN` with the
+`read:alphaess` + `write:planning` token from the cross-repo contract. That file is gitignored
+and does not travel — it is created by hand, once, on the NAS. Passing the same variables
+through `docker-compose.yml` instead is equally valid and takes precedence.
+
+### `.env` in this repo holds a KNMI key and travels nowhere
+
+A `.env` now exists in the repo root, correctly gitignored, containing one key:
+
+```
+KNMI_API_KEY
+```
+
+**Nothing in this repo reads it** — verified, zero references to `KNMI` in any tracked file.
+It is a credential parked ahead of the PV-forecast work (section 7). Consequences:
+
+- it will not travel with the clone, which is right;
+- it is also **single-copy**, like the data in section 2b. It is retrievable — KNMI Data
+  Platform → API Catalog → Open Data API → "Request an API key", shown once on screen — so
+  losing it costs a re-request, not a dead end;
+- because no code reads it, its absence on the NAS breaks nothing today. Do not add it to
+  the container until the forecast work actually lands.
+
+### Summary of what must exist on the NAS but is not in git
+
+| item | where it goes | if missing |
+|---|---|---|
+| `INFLUX_TOKEN` (read `alphaess`, write `planning`) | NAS `.env`, from `.env.example` | run refuses at `BT_INITCHARGE=influx`, now with an actionable message |
+| `INFLUX_URL=http://influxdb:8086` | same `.env`, or compose | falls back to the LAN IP, which hairpins or fails from inside the container |
+| docker network name | `docker-compose.yml`, confirmed on the NAS | container will not start |
+| `battery-data/` | outside the checkout | irreplaceable history lost — see 2b |
+| `KNMI_API_KEY` | nowhere yet | nothing, until the PV-forecast work is built |
+
+`.env.example` is committed and carries all of the above except the network name, so the NAS
+side is `cp .env.example .env` plus filling in one token.
 
 ---
 
@@ -228,9 +340,24 @@ permissions problem. Chown the mount, and verify a cache file actually appears a
 
 ### Seed the caches
 
-**Copy `price_cache/` (500+ files) to the NAS** so the cached year of EnergyZero prices is
-not refetched. `pv_cache/` starts empty, which is fine — and the NAS is a new source IP, so
-the forecast.solar rate-limit budget starts clean.
+**Do not bother copying `price_cache/`.** An earlier version of this plan said to move all
+500+ files so the cached year of EnergyZero prices was not refetched. That advice is now
+wrong, and the reason is worth recording because it was a real bug.
+
+The price cache used to be trusted unconditionally. A **live** run's cache key is today's
+date, so an entry written at 08:00 — before the day-ahead auction publishes around 13:00 —
+would be read back forever, and every later run that day would plan on a horizon that
+permanently lacked tomorrow's prices. `getPricesFromEnergyZero()` now only reads from disk
+when `rundate < today`; today and future always refetch and overwrite.
+
+The NAS runs the **live path only** (`run-matrix.sh` stays on macOS by the decision above),
+so every run there is a today-or-later run, and the cache on the NAS is **written but never
+read**. Copying 30 MB across to be ignored achieves nothing. The historical year still
+matters on the Mac, where backtests run — it is listed under "What actually travels" for
+that reason, not this one.
+
+`pv_cache/` starts empty, which is fine. The NAS is also a new source IP, so the
+forecast.solar rate-limit budget starts clean.
 
 ---
 
@@ -394,6 +521,25 @@ Schema as given in [the contract](#bucket-planning) above.
 Set the **~400-day retention on `planning`** at the same time, not later. The tag grows
 without bound and nobody will be watching.
 
+### `pv_forecast_wh` earns its place — record it from day one
+
+The schema already carries `pv_forecast_wh`, and it is now the highest-value field in the
+list rather than a nice-to-have.
+
+On 2026-07-29 the 02:00 plan forecast **18.50 kWh** of PV against **26.55 kWh** actual — 43%
+under, concentrated in the evening (16:00–20:00 ran +57% to +178%). This was investigated and
+is **not** a caching bug: raw `pv_cache/*.json` fetches at 07:00, 08:00 and 20:00 all carried
+the same ~1120 Wh for 18:00, including the fetch made *during that hour*. forecast.solar's
+weather input simply never picked up the clearing.
+
+One day is not a bias, and nothing should be retuned off it — `pvElevationLossCurve` and
+`pvOverallCalibration` stay untouched. But the comparison cannot even begin until forecasts
+are stored next to actuals, and **every day before that is unrecoverable**: forecast.solar
+has no history endpoint, so a forecast not written down at the time is gone. That makes this
+field the cheapest item in the whole plan and an argument for not deferring section 4.
+
+Next-day check is a Flux join of `planning.pv_forecast_wh` against `alphaess.pv_power_w`.
+
 ---
 
 ## 5. Grafana panel
@@ -438,10 +584,10 @@ Step 1 is entirely local to this repo and can start immediately — it does not 
 collector reorg. Steps 2–5 all touch the other repo's network, bucket, token, or Grafana.
 
 **Before any of this can be deployed, this repo has to be pushed.** The move to the NAS is a
-`git clone`, and nothing from the current working session has been committed:
-`Marstek-planning.py`, `run-matrix.sh` and `.gitignore` are modified, and `advise.py`,
-`plan-now.sh`, `influx_source.py`, `influx_to_backtest_csv.py`, `clean_backtest_csv.py` are
-untracked.
+`git clone`, so anything uncommitted does not exist as far as the NAS is concerned. The
+branch `nas-planner-and-grid-limits` carries the planner work; a later round of changes
+(price-cache fix, `advise.py --min-hours`, README/`docs/PLAN.md`, `solar-forecast.sh`) still
+needs committing on top.
 
 ## Still open, unrelated to the move
 
@@ -451,3 +597,19 @@ untracked.
 - **`pvOverallCalibration` is an unfitted 1.00.** Forecast said 16.9 kWh for 29 July against
   25.1 kWh actual on 28 July. Calibration becomes possible once plans and forecasts are
   being stored — i.e. after step 4.
+- **A better PV forecast source, researched but deliberately not built.** Buienradar called
+  the 29 July evening correctly where forecast.solar did not, but its free feed has **no
+  hourly solar forecast field** — only live `sunpower` (W/m², nearest station Lelystad, which
+  is in Flevoland) and a coarse daily `sunChance`. The real source of that edge is KNMI's
+  **HARMONIE-AROME** model, dataset `harmonie_arome_cy43_p2b` ("renewable energy
+  parameters"), CC-BY-4.0.
+
+  The cost is the catch and is why this is not scheduled: each model run is a **~1.4 GB
+  `.tar`** bundling every parameter over the whole NL grid, with no per-location endpoint.
+  One radiation number for this lat/lon means downloading it, extracting the GRIB2, and
+  decoding with `eccodes`/`cfgrib` — a real system dependency, not pure pip. Every 3 hours on
+  a 2 GB NAS that is a different class of job from forecast.solar's single JSON call.
+
+  **Do not start this before step 4 has produced a few weeks of forecast-vs-actual.** One
+  43% miss does not establish a systematic bias, and this is far too expensive to build on
+  one day of evidence.
