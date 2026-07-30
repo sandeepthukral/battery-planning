@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # Make one advisory plan for right now, and print it as instructions.
 #
 # This is the LIVE path. It is not run-matrix.sh, which is a backtest harness over a fixed
@@ -8,9 +8,46 @@
 #   ./plan-now.sh            plan from the current hour
 #
 # Advice only. Nothing is sent to the battery.
+#
+# bash, not zsh: this runs both on a Mac and in a python:3.12-slim container, which has no
+# zsh. Everything below is deliberately written to work on both, because the whole point of
+# a scheduled planner is that nobody is watching it when it breaks.
 set -u
-cd "$(dirname "$0")"
-PY=.venv/bin/python
+
+# Where the code lives vs. where output goes. On the Mac these are the same directory and
+# nothing changes. In the container the code is baked into the image at /app and every
+# written artefact - plans/, logs/, price_cache/, pv_cache/, the planner's own
+# entsoe-output file - belongs on the bind-mounted /data, which survives a rebuild.
+# BT_DATA_DIR is what splits them. Everything the planner writes is CWD-relative, so
+# changing directory is the whole mechanism; the scripts are then called by absolute path.
+scriptDir=$(cd "$(dirname "$0")" && pwd)
+cd "${BT_DATA_DIR:-$scriptDir}"
+
+# advise.py imports influx_source without the sys.path guard that Marstek-planning.py has,
+# so once the CWD is no longer the code directory it needs telling where to look. The
+# container also sets this, harmlessly; here it makes a Mac run with BT_DATA_DIR work too.
+export PYTHONPATH=${PYTHONPATH:-$scriptDir}
+
+# Pin the wall clock before reading it. Everything here - the plan filename, BT_START,
+# BT_STARTHOUR, the energy-tax year - comes from `date`, which follows TZ. A container
+# defaults to UTC, so without this the 14:05 run would ask the planner to start at hour 12
+# and would write its plan under the wrong hour, while Marstek-planning.py's own clock (see
+# its "Wall clock" block) correctly said 14. The two must not be allowed to disagree.
+#
+# Keyed off BT_TZ, not TZ, and deliberately so. Defaulting with ${TZ:-...} would let an
+# image that sets TZ=UTC win, which is precisely the case this exists to defend against.
+# BT_TZ is the single knob: Marstek-planning.py reads the same variable for its own clock,
+# so the shell and the planner cannot end up in different timezones.
+#   TZ=UTC ./plan-now.sh        still plans in Amsterdam time
+#   BT_TZ=UTC ./plan-now.sh     plans in UTC, both halves agreeing
+export BT_TZ=${BT_TZ:-Europe/Amsterdam}
+export TZ=$BT_TZ
+
+# The venv is a darwin build and is gitignored, so it exists on the Mac and never in the
+# container, where dependencies are installed into the image instead. Prefer it when present.
+if [ -z "${PY:-}" ]; then
+  if [ -x "$scriptDir/.venv/bin/python" ]; then PY="$scriptDir/.venv/bin/python"; else PY=python3; fi
+fi
 
 # Where to reach InfluxDB. Two environments, and the difference is not cosmetic:
 #
@@ -27,8 +64,18 @@ if [ -z "${INFLUX_URL:-}" ]; then
   export INFLUX_HOST=${INFLUX_HOST:-192.168.68.105}
 fi
 
+# "Tomorrow" has no portable spelling: GNU date wants -d, BSD/macOS date wants -v, and each
+# rejects the other's flag. Try GNU first, fall back to BSD. Note this is NOT the change the
+# deployment plan originally prescribed - switching outright to "date -d tomorrow" fixes
+# Linux and breaks the Mac, where date exits 1 with "illegal option -- d".
+tomorrow=$(date -d tomorrow +%Y%m%d 2>/dev/null || date -v+1d +%Y%m%d)
+if [ -z "$tomorrow" ]; then
+  # Neither form worked. Say so and stop: an empty BT_END reaches _ask(), which warns and
+  # falls back to a default end date, quietly producing a plan over the wrong window.
+  printf '%s\n' "ERROR: could not compute tomorrow's date with either 'date -d' or 'date -v'" >&2
+  exit 1
+fi
 today=$(date +%Y%m%d)
-tomorrow=$(date -v+1d +%Y%m%d)
 hour=$(date +%H)
 year=$(date +%Y)
 
@@ -37,7 +84,7 @@ case $year in
   2025) etax=0.12286 ;;
   2026) etax=0.11085 ;;
   *)    etax=${BT_ETAX:-0.11085}
-        print "WARNING: no energy tax on file for $year; using $etax. Check the 2027 rate." ;;
+        printf '%s\n' "WARNING: no energy tax on file for $year; using $etax. Check the 2027 rate." ;;
 esac
 
 mkdir -p plans logs
@@ -69,18 +116,18 @@ BT_START=$today BT_END=$tomorrow BT_STARTHOUR=$hour \
 BT_INITCHARGE=influx BT_MINSOC=10 BT_RTE=90 \
 BT_ETAX=$etax \
 BT_XMLAVAIL=N BT_OVERWRITE=Y BT_PRICE_CACHE=price_cache \
-  $PY Marstek-planning.py -s -p -u -b < /dev/null >> $log 2>&1
+  $PY "$scriptDir/Marstek-planning.py" -s -p -u -b < /dev/null >> "$log" 2>&1
 rc=$?
 
-if [[ $rc -ne 0 ]]; then
-  print "planner failed (exit $rc). Last lines of $log:"
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' "planner failed (exit $rc). Last lines of $log:"
   tail -20 $log
   exit $rc
 fi
 
 plan=plans/plan_${today}_${hour}.txt
 mv entsoe-output${today}.txt $plan
-print "plan written to $plan"
+printf '%s\n' "plan written to $plan"
 
 # We run every 3 hours; a plan shorter than that plus slack leaves gaps where nothing has
 # been decided if the next run is late or fails. 12h is the floor: normally the horizon runs
@@ -99,7 +146,7 @@ print "plan written to $plan"
 # tested and dead. Detecting the shell (`if [ -n "$ZSH_VERSION" ]`) works, but it keeps a
 # silent-failure mode alive to solve a problem that disappears if the pipe does. advise.py
 # prints a few lines instantly, so there is nothing to stream.
-advise_out=$($PY advise.py --min-hours 12 "$plan" 2>&1)
+advise_out=$($PY "$scriptDir/advise.py" --min-hours 12 "$plan" 2>&1)
 advise_rc=$?
 printf '%s\n' "$advise_out" | tee -a "$log"
 if [ "$advise_rc" -ne 0 ]; then

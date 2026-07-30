@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # Print today's forecast PV generation (Wh), hour by hour, from a fresh plan.
 #
 #   ./solar-forecast.sh
@@ -9,22 +9,31 @@
 # / 4), so summing the 4 quarters in an hour gives that hour's total with no
 # unit conversion.
 set -u
-cd "$(dirname "$0")"
 
-./plan-now.sh
+# Same split as plan-now.sh: the code may live somewhere read-only while the plan it writes
+# lands in BT_DATA_DIR. Read the plan from wherever plan-now.sh put it, not from next to
+# this script.
+scriptDir=$(cd "$(dirname "$0")" && pwd)
+dataDir=${BT_DATA_DIR:-$scriptDir}
+
+"$scriptDir/plan-now.sh"
 rc=$?
-if [[ $rc -ne 0 ]]; then
-  print "plan-now.sh failed (exit $rc); no fresh forecast to summarise"
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' "plan-now.sh failed (exit $rc); no fresh forecast to summarise"
   exit $rc
 fi
 
+# Match plan-now.sh's clock, or the filename computed here will not be the one it wrote.
+export BT_TZ=${BT_TZ:-Europe/Amsterdam}
+export TZ=$BT_TZ
+
 today=$(date +%Y%m%d)
 hour=$(date +%H)
-plan=plans/plan_${today}_${hour}.txt
+plan=$dataDir/plans/plan_${today}_${hour}.txt
 d=$(date +%Y-%m-%d)
 
-if [[ ! -f $plan ]]; then
-  print "ERROR: expected plan file $plan not found"
+if [ ! -f "$plan" ]; then
+  printf '%s\n' "ERROR: expected plan file $plan not found" >&2
   exit 1
 fi
 

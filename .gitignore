@@ -31,3 +31,7 @@ solarforecast.json
 
 # scratch PR text, not part of the project
 PR-DESCRIPTION.md
+
+# The container's bind mount: plans, logs, price/PV caches, raw planner output. Same
+# household data as plans/ and logs/ above, one directory deeper.
+data/

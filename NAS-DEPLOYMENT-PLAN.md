@@ -71,6 +71,24 @@ Volume itself is small: ~96 intervals × 8 runs ≈ 770 points/day.
 
 **`read:alphaess` + `write:planning`.** Not a `planning`-only token.
 
+**Delivered 2026-07-30 as `INFLUX_TOKEN_PLANNING`.** The collector replaced its single admin
+token with four narrowly-scoped ones; that is the name ours has on its side. `influx_source.py`
+reads either `INFLUX_TOKEN_PLANNING` or `INFLUX_TOKEN`, preferring the specific name within a
+given source, so the value can be copied across without being renamed on the way.
+
+**The sibling-checkout fallback is gone.** `influx_source.py` used to read
+`../../alphaess-collector/.env` as a third resolution step, so a Mac checkout beside that
+repo needed no token of its own. Removed on 2026-07-30: this repo has no business reading
+another one's private file, the relative path was a guess about directory layout that held
+on exactly one machine, and the coupling was silent in the way that matters — after the
+token split it would have handed back the **admin** token while the correctly-scoped one sat
+beside it. It was doing precisely that, unnoticed, until the fallback was removed and the
+Mac's own `.env` turned out to hold nothing but `KNMI_API_KEY`.
+
+It was also quietly supplying `ALPHAESS_SYS_SN`, so removing it widened the system filter to
+`<all>` until that key was written into this repo's `.env` too. Resolution is now two steps:
+the real environment, then this repo's `.env`.
+
 The planner reads from `alphaess` on every single run:
 
 | field | used for |
@@ -93,8 +111,8 @@ So: one datasource, token readable on both buckets.
 
 ### What this repo needs from that one
 
-- the docker network name (expected `alphaess-collector_alphaess-net`, but compose prefixes
-  by project directory — confirm with `docker network ls | grep alphaess`)
+- ~~the docker network name~~ **confirmed 2026-07-30: `alphaess-net`** (see 2, "Which
+  network")
 - the `planning` bucket created, with retention set
 - the token above
 - a mount line in *that* repo's `docker-compose.yml` for the new dashboard JSON, alongside
@@ -102,24 +120,38 @@ So: one datasource, token readable on both buckets.
 
 ---
 
-## 1. Portability fixes
+## 1. Portability fixes — **COMPLETE**
 
-**Do these first. Nothing works without them, and each is a silent failure on Linux rather
-than a loud one.**
+Each of these was a silent failure on Linux rather than a loud one. All are done and
+verified; a full-month backtest is byte-identical to `main`, so nothing here changed what the
+planner decides — only where it can run.
 
-### 1.1 `plan-now.sh` is macOS-only
+### 1.1 `plan-now.sh` is macOS-only — **DONE**
 
-| line | now | needs |
-|---|---|---|
-| 1 | `#!/bin/zsh` | `#!/bin/bash` — `python:3.12-slim` has no zsh |
-| 20 | `date -v+1d` | `date -d tomorrow` — **BSD-only flag** |
-| 29, 65, 72, 81 | `print` | `printf` — zsh builtin, absent in bash |
-| 13 | `PY=.venv/bin/python` | `python` — the checked-in `.venv` is a darwin build and must never enter the image |
-| ~~17~~ | ~~`INFLUX_HOST=192.168.68.105`~~ | **DONE** — now only defaults when `INFLUX_URL` is unset, so compose wins in the container and the LAN address still works on the Mac |
-| ~~79~~ | ~~`$pipestatus[1]`~~ | **DONE** — pipeline removed entirely, see below |
+`plan-now.sh` and `solar-forecast.sh` are both `#!/bin/bash` now, with `print` → `printf`
+and `[[ ]]` → `[ ]` throughout. Verified under `bash -n`, `zsh -n` **and** a real run.
 
-The `date` one is the dangerous one. On Linux it fails to an **empty** `BT_END`, and an
-empty env var falls straight through `_ask()` into `input()` — see next item.
+| was | now |
+|---|---|
+| `#!/bin/zsh` | `#!/bin/bash` — `python:3.12-slim` has no zsh |
+| `date -v+1d` | try GNU, fall back to BSD — **see below, the plan was wrong here** |
+| `print` | `printf '%s\n'` |
+| `PY=.venv/bin/python` | `.venv/bin/python` if present, else `python3` |
+| `INFLUX_HOST=192.168.68.105` | only defaults when `INFLUX_URL` is unset |
+| `$pipestatus[1]` | pipeline removed entirely |
+| *(new)* | `export TZ=$BT_TZ`, so shell dates and the planner share one clock |
+
+**Correction: `date -d tomorrow` is not the fix.** This plan previously said to switch
+outright. That fixes Linux and *breaks the Mac*, where `plan-now.sh` is run by hand — BSD
+date rejects `-d` with `date: illegal option -- d` and exits 1. GNU rejects `-v` the same
+way. There is no shared spelling, so:
+
+```sh
+tomorrow=$(date -d tomorrow +%Y%m%d 2>/dev/null || date -v+1d +%Y%m%d)
+```
+
+with an explicit empty check after it. An empty `BT_END` no longer hangs — `_ask()` warns and
+takes a default — but it would still plan over the wrong window, so the script stops instead.
 
 **The `pipestatus` trap, recorded because the fix is not the obvious one.** zsh's array is
 1-indexed, bash's is 0-indexed:
@@ -159,48 +191,75 @@ it takes the default silently. That last branch is what makes the constants at t
 Verified on the live path and across a full-year backtest: defaults, explicit overrides and
 an empty `BT_CAP=` all produce the expected plan, and no run hangs.
 
-### 1.3 Timezone
+### 1.3 Timezone — **DONE**
 
-Set `TZ=Europe/Amsterdam` in the container and install `tzdata`.
+The original instruction was "set `TZ=Europe/Amsterdam` in the container and install
+`tzdata`". That is still worth doing, but it was the wrong *primary* fix: it makes
+correctness depend on a Dockerfile line that nobody rereads, and it is silent when removed.
 
-This is correctness, not cosmetics. `Marstek-planning.py:1415` decides whether tomorrow's
-prices should exist yet from a **naive** `datetime.now().hour >= 15`. Under UTC that
-threshold lands at 17:00 local — so **the 14:05 run, whose entire purpose is to catch the
-13:00 price release, would plan a short horizon and not say so.**
+The program no longer depends on the process timezone. `Marstek-planning.py` gains a
+`planningTZ` / `localNow()` / `localToday()` block keyed off `BT_TZ` (default
+`Europe/Amsterdam`), and all seven wall-clock reads go through it — including the one that
+matters, the `currentHour >= 15` test deciding whether tomorrow's day-ahead should exist.
+Under UTC that test fired at 17:00 local, so **the 14:05 run would plan a short horizon and
+say nothing**.
 
-Also naive and date-bearing:
+The helpers return **naive** datetimes on purpose. The rest of the file compares naive values
+throughout; converting wholesale to aware datetimes is a far larger change with real risk of a
+silent one-hour error. Attaching the right wall clock to the existing convention fixes the bug
+without disturbing it.
 
-- `:215` `today = date.today()` — feeds the `BT_START` default and the
-  `runDate.date() == today` gates at `:1435` and `:1938`, where an off-by-one day
-  **silently drops PV from the plan**.
-- `:372`, `:410` — `datetime.now()` for the default start hour.
+`plan-now.sh` also exports `TZ=$BT_TZ`, because the plan filename, `BT_START`, `BT_STARTHOUR`
+and the energy-tax year all come from shell `date`, which follows `TZ`. Keyed off `BT_TZ`
+rather than `${TZ:-...}` deliberately — the latter would let an image that sets `TZ=UTC` win,
+which is the exact case being defended against. One knob, both halves.
 
-Widen `influx_source.py:48`: it catches only `ImportError`, so a missing tzdata would crash
-hard there instead of falling back.
-
-### 1.4 Add `requirements.txt`
-
-Dependencies currently exist only inside `.venv`, discoverable nowhere else:
+Measured:
 
 ```
-requests
-pulp
-paho-mqtt
+TZ=Europe/Amsterdam   naive now()=12:19   localNow()=12:19
+TZ=UTC                naive now()=10:19   localNow()=12:19
+TZ=America/Los_Angeles naive now()=03:19  localNow()=12:19
 ```
 
-`paho-mqtt` is imported unconditionally at `Marstek-planning.py:152` even though MQTT is
-unused, so it has to be installed.
+A full `TZ=UTC ./plan-now.sh` produces advice **identical** to the normal run and writes
+`plans/plan_20260730_12.txt` — the Amsterdam hour, not UTC's 10.
 
-### 1.5 Add `timeout=` to the outbound calls
+`influx_source.py` now catches `Exception` rather than `ImportError` around its `ZoneInfo`
+setup. `ImportError` only covers "no zoneinfo module"; the likely slim-container failure is
+`ZoneInfoNotFoundError`, where the module imports fine but no tzdata exists. A bogus `BT_TZ`
+now warns and falls back to the system clock instead of crashing — verified.
 
-`forecast.solar` `:924`, ENTSOE `:979`, EnergyZero `:1172` — all three `requests.get` calls
-are currently unbounded. A scheduled job that hangs forever is worse than one that fails,
-because nothing surfaces it.
+### 1.4 Add `requirements.txt` — **DONE**
 
-### 1.6 `solar-forecast.sh` has the same problems
+```
+requests==2.34.2
+pulp==3.3.2
+paho-mqtt==2.1.0
+tzdata==2026.3
+```
 
-Added after this section was first written. `#!/bin/zsh`, `print` on lines 17 and 27. It
-wraps `plan-now.sh` and summarises the PV forecast by hour.
+Pinned, not floating: the NAS resolves these fresh at image build, months after they were last
+exercised, and an unpinned solver picking up a new major is exactly the failure a scheduled job
+reports to nobody. The first three are pinned to the versions **verified running here**, not to
+guesses. `paho-mqtt` is imported unconditionally even though MQTT is unused, so it is required.
+`tzdata` is not imported by name — it is the data behind `zoneinfo`, absent from
+`python:3.12-slim`, and without it `ZoneInfo("Europe/Amsterdam")` raises. All four resolve.
+
+### 1.5 Add `timeout=` to the outbound calls — **DONE**
+
+`HTTP_TIMEOUT=(10,30)` (connect, read) on the three live calls: forecast.solar, ENTSOE and
+EnergyZero.
+
+The eight Domoticz `requests.get(baseJSON+...)` calls and the notification email are left
+unbounded. They are unreachable with `useDomoticz=False` and touching them would expand the
+diff into dead code — but if that flag is ever set back to `True`, they need the same
+treatment.
+
+### 1.6 `solar-forecast.sh` — **DONE**
+
+Ported alongside `plan-now.sh`: bash shebang, `printf`, `[ ]` tests. It wraps `plan-now.sh`
+and summarises the PV forecast by hour.
 
 It is a **convenience script for the Mac**, not part of the scheduled path — it forces a full
 replan just to print a forecast, which on a 3-hourly schedule is wasted API budget. Port it
@@ -221,30 +280,37 @@ for consistency if it goes in the image at all; do not schedule it. Once plans a
 cannot exist, `_read_env_file()` swallows the miss (`except OSError: pass`), and the run dies
 at `BT_INITCHARGE=influx` with a message pointing at `INFLUX_ENV_FILE` — the wrong fix.
 
-`config()` now resolves each key through three sources, first non-empty wins:
+`config()` now resolves each key through two sources, first non-empty wins:
 
 | # | source | who uses it |
 |---|---|---|
 | 1 | the real environment | docker-compose on the NAS, `plan-now.sh`, a manual export |
 | 2 | **this repo's `.env`** | the portable answer; documented in `.env.example` |
-| 3 | `../../alphaess-collector/.env` | dev convenience on the Mac — no token copied by hand |
 
-Step 3 stays only so a Mac checkout keeps working untouched; it is expected to resolve to
-nothing anywhere else. `.env.example` **is committed** and lists every key with both the
+An interim version kept the collector's `.env` as a third step, so the Mac needed no token of
+its own. **Dropped 2026-07-30** — see "Token" in the cross-repo contract for why. Every
+machine now needs its own `.env`, the dev Mac included; that is a one-line cost and it removes
+a dependency on where two unrelated repos happen to sit on disk.
+
+`.env.example` **is committed** and lists every key with both the
 `INFLUX_URL=http://influxdb:8086` container form and the `INFLUX_HOST=` LAN form.
 
 The failure message now names what is missing and every path searched, and says to pass the
 variables from docker-compose when in a container:
 
 ```
-InfluxDB is not configured: missing INFLUX_URL (or INFLUX_HOST) and INFLUX_TOKEN.
-  Searched: the environment, then /nonexistent/.env, then /app/../../alphaess-collector/.env.
+InfluxDB is not configured: missing INFLUX_URL (or INFLUX_HOST) and INFLUX_TOKEN (or
+  INFLUX_TOKEN_PLANNING).
+  Searched: the environment, then /nonexistent/.env.
   Copy .env.example to .env and fill it in, or set the variables directly (in a
   container, pass them from docker-compose).
 ```
 
-**At deployment:** `cp .env.example .env` on the NAS and fill in `INFLUX_TOKEN` with the
-`read:alphaess` + `write:planning` token from the cross-repo contract. That file is gitignored
+**At deployment:** `cp .env.example .env` on the NAS and fill in `INFLUX_TOKEN_PLANNING` with
+the `read:alphaess` + `write:planning` token of the same name from the collector's `.env`.
+`entrypoint.sh` refuses to start when neither name is set, naming both - compose's own
+`${VAR:?}` guard cannot express "one of these two", which is why that check moved into the
+entrypoint. That file is gitignored
 and does not travel — it is created by hand, once, on the NAS. Passing the same variables
 through `docker-compose.yml` instead is equally valid and takes precedence.
 
@@ -270,7 +336,7 @@ It is a credential parked ahead of the PV-forecast work (section 7). Consequence
 
 | item | where it goes | if missing |
 |---|---|---|
-| `INFLUX_TOKEN` (read `alphaess`, write `planning`) | NAS `.env`, from `.env.example` | run refuses at `BT_INITCHARGE=influx`, now with an actionable message |
+| `INFLUX_TOKEN_PLANNING` (read `alphaess`, write `planning`) | NAS `.env`, from `.env.example` | container refuses to start, naming both accepted variable names |
 | `INFLUX_URL=http://influxdb:8086` | same `.env`, or compose | falls back to the LAN IP, which hairpins or fails from inside the container |
 | docker network name | `docker-compose.yml`, confirmed on the NAS | container will not start |
 | `battery-data/` | outside the checkout | irreplaceable history lost — see 2b |
@@ -281,15 +347,93 @@ side is `cp .env.example .env` plus filling in one token.
 
 ---
 
-## 2. Container
+## 2. Container — **written, build not yet run on the NAS**
+
+`Dockerfile`, `docker-compose.yml` and `.dockerignore` are committed. Everything below is
+verified as far as it can be off the NAS; the build itself needs Docker on the NAS (Docker
+Desktop is not running on the Mac, and an arm64 build would not prove anything about the
+DS220+'s x86_64 CBC binary anyway).
 
 ### Dockerfile
 
-`python:3.12-slim`, `tzdata`, non-root user, `requirements.txt`, then the `.py` files and
-`plan-now.sh` — mirroring `alphaess-collector/collector/Dockerfile`.
+`python:3.12-slim`, OS `tzdata`, `requirements.txt`, then the `.py` files and both shell
+scripts, running as a non-root user - one adopted at startup from the data mount, not fixed at build
+time (see "The UID trap" below).
 
-Add a **build-time CBC smoke test** that solves a two-variable LP. x86_64 should be fine,
-but proving it at build beats discovering it at 02:05.
+**`tzdata` is installed as an OS package, not just the pip one.** They serve different
+consumers: `plan-now.sh` reads the clock with the shell's `date`, which resolves `TZ`
+against `/usr/share/zoneinfo`, while the pip package is visible only to Python's `zoneinfo`.
+Install one and not the other and the shell and the planner sit in different timezones —
+exactly the failure 1.3 exists to prevent.
+
+Two **build-time smoke tests**, because both failures would otherwise appear at 02:05 as a
+missing plan:
+
+1. CBC solves a two-variable LP and the objective is checked, not just the status. Catches a
+   solver that installs but cannot execute.
+2. `ZoneInfo("Europe/Amsterdam")` resolves. Catches a slim base without tzdata, which the
+   planner would survive — falling back to the system clock with a warning nobody reads.
+
+### The `/app` vs `/data` split
+
+Code is baked into the image at `/app`; everything written goes to the bind-mounted `/data`.
+That needed a change to `plan-now.sh`, because it used to `cd` to its own directory and
+everything the planner writes is CWD-relative.
+
+It now resolves `scriptDir`, changes to **`BT_DATA_DIR`** (defaulting to `scriptDir`, so the
+Mac is unaffected), and calls the Python entry points by absolute path. It also exports
+`PYTHONPATH=$scriptDir`, because `advise.py` imports `influx_source` **without** the
+`sys.path` guard `Marstek-planning.py` has, and that only matters once the CWD is no longer
+the code directory. `solar-forecast.sh` got the same treatment.
+
+Verified on the Mac: with `BT_DATA_DIR` set, `plans/`, `logs/`, `price_cache/`, `pv_cache/`
+and `solarforecast.json` all appear under the data directory and **nothing is written into
+the repo**; with it unset, behaviour is unchanged.
+
+### `.dockerignore` is an allowlist
+
+Deliberately `*` followed by explicit `!` rules, rather than a list of exclusions. This repo
+holds a year of household load data and a `.env`; a denylist that misses one pattern bakes
+either into an image layer, where it survives deleting the file and is readable with
+`docker history`. Simulated against the real tree: the build context is **10 files** — the six
+`.py`, `requirements.txt`, the two shell scripts and `entrypoint.sh` — with no `.env`, no CSV, no cache.
+
+### The UID trap — designed out, not documented around
+
+The first version of this baked `PLANNER_UID:PLANNER_GID` into the image as build args and
+asked whoever deployed it to match the owner of `./data` by hand, because a bind mount
+replaces the image's ownership with the host's.
+
+That is a bad design, and the reason is worth stating: **a mismatch fails silently.**
+`Marstek-planning.py` wrapped both of its cache writes in a bare `except: pass`, so an
+unwritable mount meant every run refetched instead of caching, and the symptom that eventually
+surfaced was forecast.solar **rate-limiting** — which reads as an API problem, not a
+permissions one. A deployment step that is easy to get wrong, has no feedback when wrong, and
+misreports its own failure is a step that should not exist.
+
+Replaced by **`entrypoint.sh`**, which answers the question at runtime instead of asking it at
+build time:
+
+1. Starts as root (no `USER` in the Dockerfile — the image cannot know the right UID).
+2. Reads the owner off `/data` with `stat` and becomes that user via `gosu`. Whoever owns the
+   directory on the host owns the files it produces. No `.env` entry, no rebuild when it
+   changes, nothing to get wrong.
+3. If `/data` is owned by **root**, docker created it because it did not exist. Nobody has a
+   claim on it, so the entrypoint chowns it to `PLANNER_UID` (default 1000) and says so. This
+   is the only case where those variables are read at all.
+4. Adds a `/etc/passwd` and `/etc/group` line for the adopted UID, so `getpwuid()` does not
+   raise from inside unrelated library code.
+5. **Writes an actual probe file** as the target user and **refuses to start** if it cannot,
+   naming the directory, the uid, and the `chown` that fixes it. A real write, not `test -w`:
+   Synology carries DSM ACLs on top of the POSIX mode, so the permission bits can say yes
+   where the write still fails.
+
+The two bare `except: pass` handlers now call `warnCacheWrite()`, which prints once per path.
+Cache failure stays non-fatal — the plan is already built from the response held in memory —
+but it is no longer invisible.
+
+Net effect on deployment: `mkdir -p data` as yourself before the first run, and that is the
+whole of it. Skip even that and it still works, with a line in the log explaining what it did.
 
 ### docker-compose.yml
 
@@ -299,10 +443,12 @@ services:
     build: .
     environment:
       INFLUX_URL: http://influxdb:8086
-      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-}
+      INFLUX_TOKEN_PLANNING: ${INFLUX_TOKEN_PLANNING:-}
       INFLUX_ORG: ${INFLUX_ORG:-home}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}     # read: actuals
       INFLUX_PLAN_BUCKET: ${INFLUX_PLAN_BUCKET:-planning}   # write: plans
+      BT_TZ: Europe/Amsterdam
       TZ: Europe/Amsterdam
       PYTHONPATH: /app
     volumes:
@@ -311,14 +457,60 @@ services:
 
 networks:
   alphaess-net:
-    name: alphaess-collector_alphaess-net    # confirm on the NAS
+    name: alphaess-net        # confirmed on the NAS, see below
     external: true
 ```
 
-Joining this network also inherits its **MTU 1400 cap**. That matters: the collector needed
-it because the NAS uplink drops full-size TLS handshake packets, surfacing as intermittent
-`SSL: UNEXPECTED_EOF_WHILE_READING`. The planner makes the same kind of outbound HTTPS
-calls and would hit the same intermittent failure on a default 1500-MTU network.
+### Which network — confirmed 2026-07-30
+
+This plan expected `alphaess-collector_alphaess-net`, on the reasoning that compose prefixes
+network names with the project directory. **That was wrong.** Two networks exist on the NAS
+and the live one is the *unprefixed* `alphaess-net`:
+
+```
+alphaess-collector-grafana-1        alphaess-net
+alphaess-collector-awtrix-pusher-1  alphaess-net
+alphaess-collector-collector-1      alphaess-net
+alphaess-collector-influxdb-1       alphaess-net
+```
+
+The prefixed `alphaess-collector_alphaess-net` still exists but carries no containers — a
+leftover from an earlier layout. An unprefixed name means the collector's compose file sets
+`name: alphaess-net` explicitly, or the network was created by hand and referenced as
+external. Either way, ours joins by that literal name. **Do not delete the empty one as part
+of this work**; it belongs to the collector repo to clean up.
+
+### `INFLUX_URL` depends on a service alias, not the container name
+
+The container is `alphaess-collector-influxdb-1`. `http://influxdb:8086` only works because
+compose registers the *service* name as a network-scoped DNS alias, and aliases are per
+network rather than per project — so a container from a different compose project on the same
+network resolves it too.
+
+That is the documented behaviour, but it is an assumption this whole design rests on, and it
+fails at 02:05 rather than at build time. Verify before writing the Dockerfile:
+
+```bash
+sudo docker run --rm --network alphaess-net alpine:3 getent hosts influxdb
+```
+
+If the alias is absent, fall back to the container name
+(`INFLUX_URL=http://alphaess-collector-influxdb-1:8086`) and note that it then breaks whenever
+the collector stack is recreated with a different scale suffix.
+
+### MTU
+
+Joining this network inherits whatever MTU it carries. The collector needed **1400** because
+the NAS uplink drops full-size TLS handshake packets, surfacing as intermittent
+`SSL: UNEXPECTED_EOF_WHILE_READING`. The planner makes the same kind of outbound HTTPS calls
+to forecast.solar and EnergyZero and would hit the same failure on a default 1500-MTU network.
+
+Still to confirm on the NAS — if `alphaess-net` is *not* capped, set it explicitly on our side:
+
+```bash
+sudo docker network inspect alphaess-net \
+  --format 'mtu={{index .Options "com.docker.network.driver.mtu"}}'
+```
 
 ### Working directory and data
 
@@ -333,7 +525,7 @@ That single mount then holds `price_cache/`, `pv_cache/`, `plans/`, `logs/`, plu
 CWD-level `entsoe-output*.txt` and `solarforecast.json`.
 
 **The mount must be writable by the container user.** `Marstek-planning.py:935` and `:1179`
-wrap their `os.makedirs` in a bare `except: pass`, so a root-owned mount fails *silently*
+wrapped their `os.makedirs` in a bare `except: pass`, so a root-owned mount failed *silently*
 and every run refetches — which against forecast.solar's 12/hour budget means the
 fail-loudly guard starts firing instead, and the cause looks like a rate limit rather than a
 permissions problem. Chown the mount, and verify a cache file actually appears after run 1.
@@ -438,10 +630,68 @@ The Sparky export carries the meter EAN, the meter number and the service addres
 never enter the repo — hence the absolute path default in `p1_to_backtest_csv.py`, overridable
 with `P1_CSV`.
 
-**To do at deployment:** copy `battery-data/` to the NAS alongside `price_cache/`. Once
-plans and actuals are landing in InfluxDB (step 4) the collector becomes the durable record
-and this only guards the pre-2026-07-17 past — but that past is the part that cannot be
-re-measured by waiting.
+**Copied to the NAS 2026-07-30**, to `/volume1/docker/battery-archive/`, and verified: an
+md5 of every file's md5, sorted, matches on both sides — `4f73c759a2262f6e3d7b50ee93abff12`
+across all 16,704 files. Mounted into the container **read-only** at `/archive`, with
+`P1_CSV` pointed at it. Read-only because the one dataset that cannot be recreated should not
+be writable by the thing most likely to have a bug in it.
+
+It sits beside `battery-planning/`, never inside it: a child of the checkout is one
+`.gitignore` slip away from a public fork.
+
+Once plans and actuals are landing in InfluxDB (step 4) the collector becomes the durable
+record and this only guards the pre-2026-07-17 past — but that past is the part that cannot
+be re-measured by waiting.
+
+**The NAS copy is still not a backup.** SHR/RAID 1 survives a disk dying; it does not survive
+fire, theft, ransomware, or an accidental delete, which RAID mirrors faithfully. There is no
+Hyper Backup job. The 6.7 MB core (everything but `S3Export/`) fits in a private GitHub repo
+and would be the third copy — still to do.
+
+#### Getting it there: rsync does not work on DSM out of the box
+
+Recorded because it cost an hour and the error message points nowhere near the cause.
+
+`/usr/bin/rsync` on DSM is **setuid root** and refuses `--server` mode — the mode every
+incoming transfer uses — with:
+
+```
+rsync error: rsync service is no running (code 43)
+```
+
+Local rsync on the NAS works fine, so nothing looks broken until a transfer is attempted.
+Over SSH the message surfaces as a bare `Permission denied, please try again.`, which reads
+as an authentication failure and sends you off checking passwords and keys. It is not.
+`ssh -v` settles it: the trace says `Authenticated ... using "publickey"` and *then* the
+denial arrives, so the refusal is remote and post-login.
+
+Enabling **Control Panel → File Services → rsync** starts the daemon on 873 but did **not**
+lift the refusal here. The remaining suspect is that tab's *"SSH encryption port"* field,
+which reads 22 while SSH actually runs on 9922 — untested, because it was not worth risking
+the SSH session mid-transfer.
+
+`tar` over SSH sidesteps all of it, needs nothing installed, and is faster anyway — 16,690 of
+the files are tiny, and rsync pays a round trip per file where tar sends one stream:
+
+```sh
+cd ~/Personal/battery-data
+tar cf - --exclude '.DS_Store' --exclude '._*' . \
+  | ssh data42 'cd /volume1/docker/battery-archive && tar xf -'
+```
+
+No `z`: `S3Export/` is already gzipped.
+
+Verification, run on both sides and compared as one number — stronger than an rsync dry run,
+since it reads every byte unconditionally rather than trusting size and mtime:
+
+```sh
+# Mac
+find . -type f ! -name '.DS_Store' ! -name '._*' -print0 \
+  | xargs -0 md5 -r    | awk '{print $1, $2}' | sort | md5
+# NAS
+find . -type f ! -name '.DS_Store' ! -name '._*' -print0 \
+  | xargs -0 md5sum    | awk '{print $1, $2}' | sort | md5sum
+```
 
 ### What actually travels to the NAS
 

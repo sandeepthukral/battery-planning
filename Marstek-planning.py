@@ -267,7 +267,44 @@ except ImportError as e:
     if useInflux:
         print("WARNING: useInflux is set but influx_source.py could not be imported : ",e)
 
-today=date.today()
+# Wall clock ##########
+# Every date and hour in this program means Europe/Amsterdam, because that is what the
+# prices, the PV forecast and the meter are all denominated in. Reading the clock with a
+# bare datetime.now() gets that right only when the process timezone happens to agree,
+# which is true on a Dutch laptop and false in a container, where TZ is usually UTC.
+#
+# The consequence is not cosmetic. getPricesFromEnergyZero() decides whether tomorrow's
+# day-ahead prices should exist yet from "current hour >= 15". Under UTC that test fires at
+# 17:00 local, so the 14:05 run - the one whose entire purpose is to pick up the ~13:00
+# price release - would plan a short horizon and say nothing about it.
+#
+# These return NAIVE datetimes deliberately. The rest of the file compares naive values
+# throughout; converting the whole program to aware datetimes is a much larger change with
+# real risk of a silent one-hour error. Attaching the correct wall clock to the existing
+# naive convention fixes the bug without touching that convention.
+#
+# Setting TZ=Europe/Amsterdam in the container is still worth doing - it makes log
+# timestamps agree with these - but the program no longer depends on it.
+planningTZname=os.environ.get("BT_TZ","Europe/Amsterdam")
+try:
+    planningTZ=ZoneInfo(planningTZname)
+except Exception as e:
+    # No tzdata (a slim image without the package) - fall back to the process clock and say
+    # so, rather than dying or silently planning on UTC.
+    print("WARNING: timezone %s unavailable (%s); falling back to the system clock. "
+          "Install tzdata, or set TZ=%s."%(planningTZname,e,planningTZname))
+    planningTZ=None
+
+def localNow():
+    """Current wall-clock time in the planning timezone, as a naive datetime."""
+    if planningTZ is None:
+        return datetime.now()
+    return datetime.now(planningTZ).replace(tzinfo=None)
+
+def localToday():
+    return localNow().date()
+
+today=localToday()
 todayString=datetime.strftime(today,'%Y%m%d')
 todayLongString=datetime.strftime(today,'%Y-%m-%d')
 
@@ -437,7 +474,7 @@ def getUserInput():
     global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts,MACaddress,gridConnectionLimit
     startdate=_ask("BT_START","Enter startdate as YYYYMMDD (default=today)   : ",todayString)
     enddate=_ask("BT_END","Enter enddate as YYYYMMDD (default=startdate+1) : ",datetime.strftime(datetime.strptime(startdate,'%Y%m%d')+timedelta(days=1),'%Y%m%d'))
-    starthour=int(_ask("BT_STARTHOUR","Enter start hour as HH (default next hour)   : ",datetime.strftime(datetime.now()+timedelta(hours=1),'%H')))
+    starthour=int(_ask("BT_STARTHOUR","Enter start hour as HH (default next hour)   : ",datetime.strftime(localNow()+timedelta(hours=1),'%H')))
     ratedBatteryCapacity=int(_ask("BT_CAP","Enter rated capacity in Wh (default %d) :"%ratedBatteryCapacity,ratedBatteryCapacity))
     # standalone mode normally takes a fixed starting charge, which is what a backtest wants.
     # A scheduled live run must start from the battery as it actually is, so BT_INITCHARGE=influx
@@ -482,7 +519,7 @@ def getPlanningInput():
 
     startdate=todayString
     enddate=datetime.strftime(datetime.strptime(startdate,'%Y%m%d')+timedelta(days=1),'%Y%m%d')
-    starthour=int(datetime.strftime(datetime.now(),'%H'))  # current hour. This assumes the program is called from domoticz at the start of the hour.
+    starthour=int(datetime.strftime(localNow(),'%H'))  # current hour. This assumes the program is called from domoticz at the start of the hour.
 
 
     responseResult,varValue=getUserVariable(MACaddressIDX)
@@ -787,7 +824,7 @@ def setBatteryAction(action,scheduleDateTime,power,schedule):
 # interface to Marstek battery, either via plugin or mqtt
     startHr=int(scheduleDateTime[11:13])
     startMin=int(scheduleDateTime[14:15])
-    currentMinute=int(datetime.now().minute)
+    currentMinute=int(localNow().minute)
     power=int(float(power/(60-currentMinute))*60)
     if power>-100 and power<100 and power!=0:
         # in the app, 100 is a minimum setting for either charge or discharge
@@ -957,14 +994,14 @@ def pvCacheFileName(groupSpec,runNow=None):
     # or a debugging loop inside the same hour must not spend another request. The free
     # tier allows about 12 requests per hour per IP and two panel groups exhaust it fast.
     cacheDir=os.environ.get("BT_PV_CACHE","pv_cache")
-    stamp=(runNow or datetime.now()).strftime("%Y%m%d%H")
+    stamp=(runNow or localNow()).strftime("%Y%m%d%H")
     key="%s_%s_%s_%s"%(groupSpec[1],groupSpec[2],groupSpec[3],stamp)
     return os.path.join(cacheDir,key.replace("/","_")+".json")
 
 def prunePVcache(keepHours=48):
     # forecasts age out; keep a couple of days so a plan can be explained after the fact
     cacheDir=os.environ.get("BT_PV_CACHE","pv_cache")
-    cutoff=(datetime.now()-timedelta(hours=keepHours)).strftime("%Y%m%d%H")
+    cutoff=(localNow()-timedelta(hours=keepHours)).strftime("%Y%m%d%H")
     try:
         for name in os.listdir(cacheDir):
             stamp=name.rsplit("_",1)[-1].split(".")[0]
@@ -972,6 +1009,25 @@ def prunePVcache(keepHours=48):
                 os.remove(os.path.join(cacheDir,name))
     except Exception:
         pass
+
+# HTTP_TIMEOUT is (connect, read), applied to every outbound call on the live path.
+# A scheduled job that hangs forever is worse than one that fails: nothing reports it,
+# and the next run stacks up behind it.
+HTTP_TIMEOUT=(10,30)
+
+_cacheWriteWarned=set()
+
+def warnCacheWrite(path,err):
+    # Failing to cache is not fatal - the plan is already built from the response we hold in
+    # memory. But swallowing it silently means every run refetches, and against forecast.solar's
+    # ~12 requests an hour that eventually surfaces as a rate-limit refusal with no visible
+    # connection to the real cause. Warn once per path so a persistent problem does not bury
+    # the plan in repeats.
+    if path in _cacheWriteWarned:
+        return
+    _cacheWriteWarned.add(path)
+    print("WARNING: could not write cache file %s (%s). The plan is unaffected, but nothing "
+          "will be cached, so every run refetches."%(path,err))
 
 def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
     # request the PV production forecast from forecast.solar and store in a file
@@ -996,7 +1052,7 @@ def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
         pvMaxPeak=groupSpec[3]
         if allResponseOK:
             url=urlwebsite+urldoctype+"/"+latitude+"/"+longitude+"/"+str(pvAngle)+"/"+str(pvAzimuth)+"/"+str(pvMaxPeak)+"?full=1"
-            response = requests.get(url)
+            response = requests.get(url,timeout=HTTP_TIMEOUT)
             if response.status_code == 200:
                 # saving the json file
                 with open(pvForecastFileName, 'wb') as f:
@@ -1007,8 +1063,8 @@ def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
                     with open(cacheFile,'wb') as cf:
                         cf.write(response.content)
                     prunePVcache()
-                except Exception:
-                    pass
+                except Exception as e:
+                    warnCacheWrite(cacheFile,e)
             else:
                 # forecast.solar reports the reason in the body; the free tier allows about
                 # 12 requests per hour per IP, which an hourly planner with two panel groups
@@ -1051,7 +1107,7 @@ def loadPricesIntoFile(entsoeFileName,loadStartDate,loadEndDate):
         # creating HTTP response object from given url
         if debug: print("Getting data from entsoe.eu for ",loadStartDate," to ",loadEndDate)
         if debug: print(url)
-        response = requests.get(url)
+        response = requests.get(url,timeout=HTTP_TIMEOUT)
         if response.status_code == 200:
             # saving the xml file
             with open(entsoeFileName, 'wb') as f:
@@ -1249,15 +1305,15 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
         with open(cacheFile) as cf:
             responseText=cf.read()
     else:
-        response=requests.get(url)
+        response=requests.get(url,timeout=HTTP_TIMEOUT)
         if response.status_code == 200:
             responseText=response.text
             try:
                 os.makedirs(cacheDir,exist_ok=True)
                 with open(cacheFile,"w") as cf:
                     cf.write(responseText)
-            except Exception:
-                pass
+            except Exception as e:
+                warnCacheWrite(cacheFile,e)
         elif os.path.exists(cacheFile):
             # refetch failed (network hiccup): fall back to whatever was cached rather than
             # returning nothing
@@ -1498,7 +1554,7 @@ def buildInitialPlanningList():
 
         # check whether entsoe provided all expected prices, if not, get them from energyzero
         if runDate.date()==today:
-            currentTime=datetime.now()
+            currentTime=localNow()
             currentHour=currentTime.hour
             if currentHour>=15:
                 expectedIntervals=48
@@ -1847,7 +1903,7 @@ def outputToTextDevice(schedule,starthour,writeMode,optimisationStatus):
             outputString=outputString.replace(' ','_')  # JSON processing removes all duplicate spaces, so use underscore to get table format
             setTextDevice(planningDisplayIDX,outputString)
             totalCosts+=record["costs"]
-    timestamp=datetime.strftime(datetime.now(),'%Y%m%d %H:%M:%S')
+    timestamp=datetime.strftime(localNow(),'%Y%m%d %H:%M:%S')
     setTextDevice(planningDisplayIDX,"date________time___pvD___pvI___use___nett__chrgD__chrg__dscg___soc____imp____exp___pr-buy__pr-sell____cost")
     if optimisationStatus!="Optimal":
         setTextDevice(planningDisplayIDX,"ATTENTION: no optimal solution achieved, status is "+optimisationStatus)
