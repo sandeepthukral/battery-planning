@@ -650,8 +650,48 @@ be re-measured by waiting.
 
 **The NAS copy is still not a backup.** SHR/RAID 1 survives a disk dying; it does not survive
 fire, theft, ransomware, or an accidental delete, which RAID mirrors faithfully. There is no
-Hyper Backup job. The 6.7 MB core (everything but `S3Export/`) fits in a private GitHub repo
-and would be the third copy — still to do.
+Hyper Backup job. The 6.7 MB core (everything but `S3Export/`) is small enough to go anywhere;
+**Google Drive is the chosen third copy** (2026-07-30). A private GitHub repo was the earlier
+suggestion and would also work, but Drive needs no repo hygiene for a dataset that is never
+edited. The Drive copy is `battery-archive-20260730-nopii.tar.gz` (986 KB, sha256
+`353a77f7e40b0158…`): the same archive minus `address.csv`, `smart_meter.csv` and `user.csv`,
+which carry the meter EAN, meter number and service address. Those are 16 KB that nothing in
+the project reads, and a cloud copy outlives a local delete, so they do not go up. Its
+`MANIFEST.sha256` lists 8 files rather than 11 so it still verifies standalone.
+
+Note what stripping them does **not** buy: the measurements are themselves household
+occupancy data — a year of hourly load says when the house is empty. The no-PII variant is
+safe for a private cloud account, not for anywhere public.
+
+#### Copied 2026-07-30
+
+Staged on the Mac at `~/Personal/battery-archive/battery-archive-20260730/` (6.7 MB core,
+11 files, plus `MANIFEST.sha256` and a `README.md` that explains the contents, the PII in
+`address.csv` / `smart_meter.csv` / `user.csv`, and the exclusions). Also
+`battery-archive-20260730.tar.gz`, 986 KB, sha256 `28ab61983e824330…` — the convenience bundle
+for moving the archive to a third destination.
+
+Copied to the NAS by `tar` over SSH and verified there with `sha256sum -c MANIFEST.sha256`
+— all 11 OK. `S3Export/` followed separately: 16,700 files both sides.
+
+Landed in **`/volume1/documents/battery-archive/`**, not the `/volume1/battery-archive/`
+this document suggests. Creating a new top-level shared folder needs either the DSM UI or
+`sudo synoshare`, and `sudo` on Data42 prompts for a password. `documents` satisfies the two
+constraints that actually matter: it is a real DSM shared folder, so a future Hyper Backup
+job can select it, and it is outside `/volume1/docker/`, so a `docker compose down -v` or a
+stack rebuild cannot reach it. Move it if a dedicated share is ever created.
+
+Two gotchas worth keeping:
+
+- **Use `COPYFILE_DISABLE=1` with macOS `tar`.** Without it, every file arrives with an
+  AppleDouble `._name` sibling carrying xattrs — harmless but it inflates the file count and
+  breaks a naive `find | wc -l` comparison between the two sides.
+- **`du` will not match and that is fine.** `S3Export/` reads 108 MB on APFS and 126 MB on
+  the NAS: 16,700 tiny files, each rounded up to a 4 K block. Compare file counts and
+  checksums, never `du`.
+
+Still to do: the offsite third copy, going to Google Drive. Until that exists, both copies are
+in the same building and a fire is a total loss.
 
 #### Getting it there: rsync does not work on DSM out of the box
 
@@ -758,8 +798,29 @@ published around 13:00.
 
 Test by hand once before enabling.
 
-Then **delete `~/Library/LaunchAgents/com.sandeep.battery-planner.plist`** on the Mac. It
-was written but never loaded, so there is nothing to unload — just remove the file.
+Then **unload and delete `~/Library/LaunchAgents/com.sandeep.battery-planner.plist`** on the
+Mac:
+
+```sh
+launchctl unload ~/Library/LaunchAgents/com.sandeep.battery-planner.plist
+rm ~/Library/LaunchAgents/com.sandeep.battery-planner.plist
+```
+
+This document previously said the agent "was written but never loaded, so there is nothing
+to unload". That was wrong, and the error was not harmless. It stayed loaded and kept firing
+on the same 3-hourly schedule as the NAS: on 2026-07-30 the 20:05 slot produced two plans a
+second apart, `2026-07-30T18:05:04Z` from the NAS and `...05Z` from the Mac.
+
+The plans were identical, so nothing looked broken — which is the problem. Consumers pick
+the newest `plan_run` by sorting the tag, so the Mac won every slot by one second and the
+Grafana dashboard was showing the **laptop's** plan, not the NAS's. The moment the two
+diverge — a sleeping laptop, a stale checkout, different `.env` values — the dashboard
+silently follows the wrong one, and the NAS deployment this whole document describes stops
+being what you are actually looking at. It also doubles the forecast.solar request rate
+against a shared public IP with a ~12/hour budget.
+
+Unloaded 2026-07-30. Verify with `launchctl list | grep battery-planner` — no output is
+correct.
 
 ---
 
