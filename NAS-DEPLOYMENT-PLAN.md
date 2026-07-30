@@ -102,24 +102,38 @@ So: one datasource, token readable on both buckets.
 
 ---
 
-## 1. Portability fixes
+## 1. Portability fixes — **COMPLETE**
 
-**Do these first. Nothing works without them, and each is a silent failure on Linux rather
-than a loud one.**
+Each of these was a silent failure on Linux rather than a loud one. All are done and
+verified; a full-month backtest is byte-identical to `main`, so nothing here changed what the
+planner decides — only where it can run.
 
-### 1.1 `plan-now.sh` is macOS-only
+### 1.1 `plan-now.sh` is macOS-only — **DONE**
 
-| line | now | needs |
-|---|---|---|
-| 1 | `#!/bin/zsh` | `#!/bin/bash` — `python:3.12-slim` has no zsh |
-| 20 | `date -v+1d` | `date -d tomorrow` — **BSD-only flag** |
-| 29, 65, 72, 81 | `print` | `printf` — zsh builtin, absent in bash |
-| 13 | `PY=.venv/bin/python` | `python` — the checked-in `.venv` is a darwin build and must never enter the image |
-| ~~17~~ | ~~`INFLUX_HOST=192.168.68.105`~~ | **DONE** — now only defaults when `INFLUX_URL` is unset, so compose wins in the container and the LAN address still works on the Mac |
-| ~~79~~ | ~~`$pipestatus[1]`~~ | **DONE** — pipeline removed entirely, see below |
+`plan-now.sh` and `solar-forecast.sh` are both `#!/bin/bash` now, with `print` → `printf`
+and `[[ ]]` → `[ ]` throughout. Verified under `bash -n`, `zsh -n` **and** a real run.
 
-The `date` one is the dangerous one. On Linux it fails to an **empty** `BT_END`, and an
-empty env var falls straight through `_ask()` into `input()` — see next item.
+| was | now |
+|---|---|
+| `#!/bin/zsh` | `#!/bin/bash` — `python:3.12-slim` has no zsh |
+| `date -v+1d` | try GNU, fall back to BSD — **see below, the plan was wrong here** |
+| `print` | `printf '%s\n'` |
+| `PY=.venv/bin/python` | `.venv/bin/python` if present, else `python3` |
+| `INFLUX_HOST=192.168.68.105` | only defaults when `INFLUX_URL` is unset |
+| `$pipestatus[1]` | pipeline removed entirely |
+| *(new)* | `export TZ=$BT_TZ`, so shell dates and the planner share one clock |
+
+**Correction: `date -d tomorrow` is not the fix.** This plan previously said to switch
+outright. That fixes Linux and *breaks the Mac*, where `plan-now.sh` is run by hand — BSD
+date rejects `-d` with `date: illegal option -- d` and exits 1. GNU rejects `-v` the same
+way. There is no shared spelling, so:
+
+```sh
+tomorrow=$(date -d tomorrow +%Y%m%d 2>/dev/null || date -v+1d +%Y%m%d)
+```
+
+with an explicit empty check after it. An empty `BT_END` no longer hangs — `_ask()` warns and
+takes a default — but it would still plan over the wrong window, so the script stops instead.
 
 **The `pipestatus` trap, recorded because the fix is not the obvious one.** zsh's array is
 1-indexed, bash's is 0-indexed:
@@ -159,48 +173,75 @@ it takes the default silently. That last branch is what makes the constants at t
 Verified on the live path and across a full-year backtest: defaults, explicit overrides and
 an empty `BT_CAP=` all produce the expected plan, and no run hangs.
 
-### 1.3 Timezone
+### 1.3 Timezone — **DONE**
 
-Set `TZ=Europe/Amsterdam` in the container and install `tzdata`.
+The original instruction was "set `TZ=Europe/Amsterdam` in the container and install
+`tzdata`". That is still worth doing, but it was the wrong *primary* fix: it makes
+correctness depend on a Dockerfile line that nobody rereads, and it is silent when removed.
 
-This is correctness, not cosmetics. `Marstek-planning.py:1415` decides whether tomorrow's
-prices should exist yet from a **naive** `datetime.now().hour >= 15`. Under UTC that
-threshold lands at 17:00 local — so **the 14:05 run, whose entire purpose is to catch the
-13:00 price release, would plan a short horizon and not say so.**
+The program no longer depends on the process timezone. `Marstek-planning.py` gains a
+`planningTZ` / `localNow()` / `localToday()` block keyed off `BT_TZ` (default
+`Europe/Amsterdam`), and all seven wall-clock reads go through it — including the one that
+matters, the `currentHour >= 15` test deciding whether tomorrow's day-ahead should exist.
+Under UTC that test fired at 17:00 local, so **the 14:05 run would plan a short horizon and
+say nothing**.
 
-Also naive and date-bearing:
+The helpers return **naive** datetimes on purpose. The rest of the file compares naive values
+throughout; converting wholesale to aware datetimes is a far larger change with real risk of a
+silent one-hour error. Attaching the right wall clock to the existing convention fixes the bug
+without disturbing it.
 
-- `:215` `today = date.today()` — feeds the `BT_START` default and the
-  `runDate.date() == today` gates at `:1435` and `:1938`, where an off-by-one day
-  **silently drops PV from the plan**.
-- `:372`, `:410` — `datetime.now()` for the default start hour.
+`plan-now.sh` also exports `TZ=$BT_TZ`, because the plan filename, `BT_START`, `BT_STARTHOUR`
+and the energy-tax year all come from shell `date`, which follows `TZ`. Keyed off `BT_TZ`
+rather than `${TZ:-...}` deliberately — the latter would let an image that sets `TZ=UTC` win,
+which is the exact case being defended against. One knob, both halves.
 
-Widen `influx_source.py:48`: it catches only `ImportError`, so a missing tzdata would crash
-hard there instead of falling back.
-
-### 1.4 Add `requirements.txt`
-
-Dependencies currently exist only inside `.venv`, discoverable nowhere else:
+Measured:
 
 ```
-requests
-pulp
-paho-mqtt
+TZ=Europe/Amsterdam   naive now()=12:19   localNow()=12:19
+TZ=UTC                naive now()=10:19   localNow()=12:19
+TZ=America/Los_Angeles naive now()=03:19  localNow()=12:19
 ```
 
-`paho-mqtt` is imported unconditionally at `Marstek-planning.py:152` even though MQTT is
-unused, so it has to be installed.
+A full `TZ=UTC ./plan-now.sh` produces advice **identical** to the normal run and writes
+`plans/plan_20260730_12.txt` — the Amsterdam hour, not UTC's 10.
 
-### 1.5 Add `timeout=` to the outbound calls
+`influx_source.py` now catches `Exception` rather than `ImportError` around its `ZoneInfo`
+setup. `ImportError` only covers "no zoneinfo module"; the likely slim-container failure is
+`ZoneInfoNotFoundError`, where the module imports fine but no tzdata exists. A bogus `BT_TZ`
+now warns and falls back to the system clock instead of crashing — verified.
 
-`forecast.solar` `:924`, ENTSOE `:979`, EnergyZero `:1172` — all three `requests.get` calls
-are currently unbounded. A scheduled job that hangs forever is worse than one that fails,
-because nothing surfaces it.
+### 1.4 Add `requirements.txt` — **DONE**
 
-### 1.6 `solar-forecast.sh` has the same problems
+```
+requests==2.34.2
+pulp==3.3.2
+paho-mqtt==2.1.0
+tzdata==2026.3
+```
 
-Added after this section was first written. `#!/bin/zsh`, `print` on lines 17 and 27. It
-wraps `plan-now.sh` and summarises the PV forecast by hour.
+Pinned, not floating: the NAS resolves these fresh at image build, months after they were last
+exercised, and an unpinned solver picking up a new major is exactly the failure a scheduled job
+reports to nobody. The first three are pinned to the versions **verified running here**, not to
+guesses. `paho-mqtt` is imported unconditionally even though MQTT is unused, so it is required.
+`tzdata` is not imported by name — it is the data behind `zoneinfo`, absent from
+`python:3.12-slim`, and without it `ZoneInfo("Europe/Amsterdam")` raises. All four resolve.
+
+### 1.5 Add `timeout=` to the outbound calls — **DONE**
+
+`HTTP_TIMEOUT=(10,30)` (connect, read) on the three live calls: forecast.solar, ENTSOE and
+EnergyZero.
+
+The eight Domoticz `requests.get(baseJSON+...)` calls and the notification email are left
+unbounded. They are unreachable with `useDomoticz=False` and touching them would expand the
+diff into dead code — but if that flag is ever set back to `True`, they need the same
+treatment.
+
+### 1.6 `solar-forecast.sh` — **DONE**
+
+Ported alongside `plan-now.sh`: bash shebang, `printf`, `[ ]` tests. It wraps `plan-now.sh`
+and summarises the PV forecast by hour.
 
 It is a **convenience script for the Mac**, not part of the scheduled path — it forces a full
 replan just to print a forecast, which on a 3-hourly schedule is wasted API budget. Port it

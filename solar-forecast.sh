@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # Print today's forecast PV generation (Wh), hour by hour, from a fresh plan.
 #
 #   ./solar-forecast.sh
@@ -13,8 +13,8 @@ cd "$(dirname "$0")"
 
 ./plan-now.sh
 rc=$?
-if [[ $rc -ne 0 ]]; then
-  print "plan-now.sh failed (exit $rc); no fresh forecast to summarise"
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' "plan-now.sh failed (exit $rc); no fresh forecast to summarise"
   exit $rc
 fi
 
@@ -23,8 +23,8 @@ hour=$(date +%H)
 plan=plans/plan_${today}_${hour}.txt
 d=$(date +%Y-%m-%d)
 
-if [[ ! -f $plan ]]; then
-  print "ERROR: expected plan file $plan not found"
+if [ ! -f "$plan" ]; then
+  printf '%s\n' "ERROR: expected plan file $plan not found" >&2
   exit 1
 fi
 

@@ -54,7 +54,11 @@ import requests
 try:
     from zoneinfo import ZoneInfo
     LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
-except ImportError:                                     # pragma: no cover
+except Exception:                                       # pragma: no cover
+    # ImportError only covers "no zoneinfo module". The likelier failure in a slim container
+    # is ZoneInfoNotFoundError: the module imports fine but the system has no tzdata, so the
+    # name cannot be resolved. Catching only ImportError turns that into a hard crash at
+    # import time, before anything can report why.
     LOCAL_TZ = None
 
 MEASUREMENT = "power_readings"
