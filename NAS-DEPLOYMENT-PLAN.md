@@ -34,7 +34,7 @@ shipped. No `coinor-cbc` package, no solver path override. (This was worth check
 | Output | **Grafana panel**, fed by plan storage. Text plans/logs still written, as a byproduct |
 | macOS | `run-matrix.sh` stays zsh/macOS — it is a backtest harness over a fixed past year, it does not move |
 | Execution | Still **none**. Advice only. Nothing is sent to the battery |
-| Looking back | A **day-after report** comparing yesterday's plans against what actually happened — money, outcomes and solar-forecast accuracy, reported separately. Wanted, not built; see [section 6](#6-the-day-after-report-plan-vs-what-actually-happened--not-built-wanted) |
+| Looking back | A **day-after report** comparing yesterday's plans against what actually happened — money, outcomes and solar-forecast accuracy, reported separately. Built 2026-07-30 as `report_day.py`; see [section 6](#6-the-day-after-report-plan-vs-what-actually-happened--built-report_daypy) |
 
 ---
 
@@ -945,7 +945,7 @@ writing it twice and letting the two drift; the honest options are to keep it pe
 now, or to store the blocks later and read them.
 
 **Panel 5 shows only the newest plan.** Stitching "the plan that was in force at each
-interval" is the harder query and belongs to [section 6](#6-the-day-after-report-plan-vs-what-actually-happened--not-built-wanted),
+interval" is the harder query and belongs to [section 6](#6-the-day-after-report-plan-vs-what-actually-happened--built-report_daypy),
 which is what needs it.
 
 ### `plan_run` had to become UTC first
@@ -974,7 +974,7 @@ rows. Not yet verified: how it *looks* — that needs the stack restarted on the
 
 ---
 
-## 6. The day-after report: plan vs what actually happened — **not built, wanted**
+## 6. The day-after report: plan vs what actually happened — **BUILT** (`report_day.py`)
 
 Sections 1–5 get plans made and shown. This is the one that says whether they were any
 good. Deliberately scheduled after them, because it cannot start until the `planning` bucket
@@ -1051,10 +1051,65 @@ bad days is visible as a trend instead of as eight text files.
   scored as a very quiet house. `hourlyEnergyWh()`'s existing `min_coverage` check already
   draws that line; the report needs to surface it rather than swallow it.
 
+### What it turned out to need — built 2026-07-30
+
+    python3 report_day.py                 # yesterday
+    python3 report_day.py 2026-07-30      # a specific local date
+    python3 report_day.py --write         # and store the comparison as plan_score
+
+The three sections are as specified. Four things the spec did not anticipate:
+
+**Actuals had to become quarter-hourly.** `hourlyEnergyWh()` was hourly and hard-coded, but
+plans are quarter-hourly since the NL day-ahead moved to a 15-minute MTU. Scoring at hourly
+resolution would average away exactly the short price spikes the planner exists to catch —
+the effect measured at +10–14% in every winter month. So `influx_source.py` gained
+`intervalEnergyWh(field, start, stop, minutes=…)`, keyed by aware local datetimes, with
+`hourlyEnergyWh()` kept as a thin wrapper over it so `advise.py`, `influx_to_backtest_csv.py`
+and the planner's own load profile are untouched. `intervalLastValue()` came with it, for
+SoC — a state field, where averaging blurs a trajectory and the value at the interval end is
+the one that means something. And `planPoints()`, because nothing could read a plan back.
+
+**Saldering needed no code at all.** The concern was that a report spanning 1 Jan 2027 would
+value exports wrongly unless it repeated `salderingApplies()` per interval. It does not have
+to: `price_sell` was written onto each plan point *with the regime that applied to that
+interval*, so using the stored prices settles it. This is a second reason not to refetch
+prices, beyond the one already recorded — a later price revision cannot change a past verdict.
+
+**A no-battery baseline had to be added to make the money readable.** Planned cost against
+actual cost says which was cheaper, not whether either was any good. The third row —
+`max(load − pv, 0)` at the same stored prices, from measured load and PV — is what turns the
+section into an answer. Without it a cheap day and a good plan are indistinguishable.
+
+**Partial windows flatter the battery, and the report has to say so.** A window that opens
+full and closes empty earns money it did not create; that energy was bought before the window
+opened. On the first real run — 15 scored intervals of an evening — the battery "saved"
+€3.57 while SoC fell 9.04 kWh. Both true, and misleading together. The money section now
+prints the SoC change across the scored window beside the euros, and says the figures are a
+full answer only when the window is a whole day ending near where it started.
+
+Also worth knowing when reading section 3: `pv_forecast_wh` is the **planning** forecast, not
+raw forecast.solar. It carries the elevation calibration, `pvOverallCalibration`, and the
+deliberate 0.85 `pvPlanningFactor`. A steady under-forecast is partly that factor working as
+designed, which matters directly for phase 5 — fitting `pvOverallCalibration` against this
+number without dividing the conservatism back out would bake the conservatism in twice.
+
+`--write` stores measurement `plan_score` in the `planning` bucket, **untagged**. Tagging it
+with the `plan_run` that was judged is the obvious thing to do and would add one series per
+run for ever — the same cardinality trap the `plan` measurement already carries once, on a
+2 GB NAS. One series, and which run was judged stays in the text output.
+
 ### Prerequisite
 
 At least a few complete days in the `planning` bucket, i.e. section 4 running unattended on
-the NAS. Until then there is nothing to compare against.
+the NAS. The script exists and is verified against a partial day; a full day cannot be
+scored until one has been planned end to end. As of 2026-07-30 the bucket holds four
+`plan_run` tags, all from that evening, so the first genuinely complete report is 2026-07-31.
+
+Two artefacts of that first evening are visible in the output and are not bugs: 70 of 96
+intervals had no plan in force, because the first plan of the day was written at 17:26 and an
+interval is never judged against a plan made after it; and two of the four tags are the
+duplicate Mac/NAS pair one second apart, from the launchd agent described above. The
+in-force rule picks the later of the two, and they were identical, so it changes nothing.
 
 ---
 

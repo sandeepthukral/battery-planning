@@ -18,6 +18,7 @@ now, and a backtest path that replays historical data:
 | `Marstek-planning.py` | The LP optimiser itself. Reads prices/PV/usage/SOC, writes a plan table (`entsoe-output<date>.txt`). See "Program internal logic" below and `docs/PLAN.md` for the output format. |
 | `plan-now.sh` | **Live path.** Runs the planner for the current moment (real SOC from InfluxDB, today+tomorrow's prices, fresh PV forecast), saves the plan to `plans/plan_<date>_<hour>.txt`, and runs `advise.py` as a sanity check. Advisory only — nothing is sent to the battery. |
 | `advise.py` | Turns a raw plan table into a human-readable summary: consecutive intervals collapsed into labelled blocks (buy/charge from solar/sell/cover load/spill/idle) with kWh, average price and euro value per block. Can also compare a plan against what the battery actually did, via InfluxDB (`--actuals`). |
+| `report_day.py` | **Day-after report.** Scores a past day's stored plans against what actually happened, in three separate sections: money at the prices that applied, outcomes (SoC and grid), and forecast error for PV and load. Each interval is judged against the plan that was in force for it, not against one plan for the whole day. `--write` stores the comparison back as measurement `plan_score`. |
 | `solar-forecast.sh` | Runs `plan-now.sh` and prints just the forecast PV generation (Wh) for today, by hour. |
 | `influx_source.py` | Shared data-access module for the InfluxDB instance fed by `alphaess-collector` — battery SOC and recent hourly load/PV. This is the live data source; run `python3 influx_source.py` on its own as a connectivity self-test. |
 | `clean_backtest_csv.py` | Repairs the raw APsystems EMA hourly export (redistributes outage catch-up spikes, drops zero-load days) before it's used as backtest input. |
@@ -25,7 +26,8 @@ now, and a backtest path that replays historical data:
 | `p1_to_backtest_csv.py` | Builds a backtest CSV from the Sparky P1 smart-meter export (pre-battery-installation period only, using the load = solar + delivery − return identity). |
 | `run-matrix.sh` | **Backtest path.** Drives the planner across an 8-run matrix (power limit × saldering × real-vs-no-battery) over a fixed historical year, to isolate what the battery itself is worth. Needs a CSV built by one of the three scripts above. |
 
-Live path: `solar-forecast.sh` → `plan-now.sh` → `Marstek-planning.py` → `advise.py`.
+Live path: `solar-forecast.sh` → `plan-now.sh` → `Marstek-planning.py` → `advise.py`, with
+`report_day.py` closing the loop the next day.
 Backtest path: `clean_backtest_csv.py` / `influx_to_backtest_csv.py` / `p1_to_backtest_csv.py` → `run-matrix.sh` → `Marstek-planning.py` (run 8×).
 
 Deeper detail lives in `docs/PLAN.md` (plan file column format) and `NAS-DEPLOYMENT-PLAN.md` (moving the live path onto always-on hardware).
