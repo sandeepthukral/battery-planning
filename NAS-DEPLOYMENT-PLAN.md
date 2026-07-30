@@ -332,7 +332,8 @@ DS220+'s x86_64 CBC binary anyway).
 ### Dockerfile
 
 `python:3.12-slim`, OS `tzdata`, `requirements.txt`, then the `.py` files and both shell
-scripts, running as a non-root user.
+scripts, running as a non-root user - one adopted at startup from the data mount, not fixed at build
+time (see "The UID trap" below).
 
 **`tzdata` is installed as an OS package, not just the pip one.** They serve different
 consumers: `plan-now.sh` reads the clock with the shell's `date`, which resolves `TZ`
@@ -369,26 +370,45 @@ the repo**; with it unset, behaviour is unchanged.
 Deliberately `*` followed by explicit `!` rules, rather than a list of exclusions. This repo
 holds a year of household load data and a `.env`; a denylist that misses one pattern bakes
 either into an image layer, where it survives deleting the file and is readable with
-`docker history`. Simulated against the real tree: the build context is **9 files** — the six
-`.py`, `requirements.txt`, and the two shell scripts — with no `.env`, no CSV, no cache.
+`docker history`. Simulated against the real tree: the build context is **10 files** — the six
+`.py`, `requirements.txt`, the two shell scripts and `entrypoint.sh` — with no `.env`, no CSV, no cache.
 
-### The UID trap
+### The UID trap — designed out, not documented around
 
-The container runs as `PLANNER_UID:PLANNER_GID` (default 1000/1000, build args). This must
-match the owner of `./data` on the host, because a bind mount replaces the image's ownership
-with the host's.
+The first version of this baked `PLANNER_UID:PLANNER_GID` into the image as build args and
+asked whoever deployed it to match the owner of `./data` by hand, because a bind mount
+replaces the image's ownership with the host's.
 
-**A mismatch fails silently.** `Marstek-planning.py:935` and `:1179` wrap their `os.makedirs`
-in a bare `except: pass`, so an unwritable mount means every run refetches instead of
-caching. The symptom that eventually surfaces is forecast.solar **rate-limiting**, which
-reads as an API problem rather than a permissions one. Since `sudo docker compose` will
-create `./data` as root:
+That is a bad design, and the reason is worth stating: **a mismatch fails silently.**
+`Marstek-planning.py` wrapped both of its cache writes in a bare `except: pass`, so an
+unwritable mount meant every run refetched instead of caching, and the symptom that eventually
+surfaced was forecast.solar **rate-limiting** — which reads as an API problem, not a
+permissions one. A deployment step that is easy to get wrong, has no feedback when wrong, and
+misreports its own failure is a step that should not exist.
 
-```bash
-mkdir -p /volume1/docker/battery-planning/data      # BEFORE the first compose run
-ls -n /volume1/docker/battery-planning              # note the uid/gid on data
-# put them in .env as PLANNER_UID / PLANNER_GID, then build
-```
+Replaced by **`entrypoint.sh`**, which answers the question at runtime instead of asking it at
+build time:
+
+1. Starts as root (no `USER` in the Dockerfile — the image cannot know the right UID).
+2. Reads the owner off `/data` with `stat` and becomes that user via `gosu`. Whoever owns the
+   directory on the host owns the files it produces. No `.env` entry, no rebuild when it
+   changes, nothing to get wrong.
+3. If `/data` is owned by **root**, docker created it because it did not exist. Nobody has a
+   claim on it, so the entrypoint chowns it to `PLANNER_UID` (default 1000) and says so. This
+   is the only case where those variables are read at all.
+4. Adds a `/etc/passwd` and `/etc/group` line for the adopted UID, so `getpwuid()` does not
+   raise from inside unrelated library code.
+5. **Writes an actual probe file** as the target user and **refuses to start** if it cannot,
+   naming the directory, the uid, and the `chown` that fixes it. A real write, not `test -w`:
+   Synology carries DSM ACLs on top of the POSIX mode, so the permission bits can say yes
+   where the write still fails.
+
+The two bare `except: pass` handlers now call `warnCacheWrite()`, which prints once per path.
+Cache failure stays non-fatal — the plan is already built from the response held in memory —
+but it is no longer invisible.
+
+Net effect on deployment: `mkdir -p data` as yourself before the first run, and that is the
+whole of it. Skip even that and it still works, with a line in the log explaining what it did.
 
 ### docker-compose.yml
 
@@ -479,7 +499,7 @@ That single mount then holds `price_cache/`, `pv_cache/`, `plans/`, `logs/`, plu
 CWD-level `entsoe-output*.txt` and `solarforecast.json`.
 
 **The mount must be writable by the container user.** `Marstek-planning.py:935` and `:1179`
-wrap their `os.makedirs` in a bare `except: pass`, so a root-owned mount fails *silently*
+wrapped their `os.makedirs` in a bare `except: pass`, so a root-owned mount failed *silently*
 and every run refetches — which against forecast.solar's 12/hour budget means the
 fail-loudly guard starts firing instead, and the cause looks like a rate limit rather than a
 permissions problem. Chown the mount, and verify a cache file actually appears after run 1.

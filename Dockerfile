@@ -9,9 +9,14 @@ FROM python:3.12-slim
 # clock with the shell's `date`, which resolves TZ against /usr/share/zoneinfo; the pip
 # package is visible only to Python's zoneinfo. Install just one and the shell and the
 # planner end up in different timezones - precisely the failure the BT_TZ work prevents.
+#
+# gosu is how entrypoint.sh drops from root to the UID that owns the data mount. `su` brings
+# a login session, a PAM stack and its own signal handling along with it; gosu execs and gets
+# out of the way, which is what a one-shot batch container wants.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends tzdata gosu \
+ && rm -rf /var/lib/apt/lists/* \
+ && gosu nobody true
 
 ENV TZ=Europe/Amsterdam \
     BT_TZ=Europe/Amsterdam \
@@ -44,29 +49,16 @@ print('CBC smoke test OK')"
 RUN python -c "from zoneinfo import ZoneInfo; from datetime import datetime; \
 print('timezone OK:', datetime.now(ZoneInfo('Europe/Amsterdam')).strftime('%Y-%m-%d %H:%M %Z'))"
 
-COPY *.py plan-now.sh solar-forecast.sh ./
-RUN chmod +x plan-now.sh solar-forecast.sh
-
-# Non-root, with a UID that must match the owner of the bind-mounted /data.
-#
-# Get this wrong and the failure is SILENT: Marstek-planning.py wraps its os.makedirs calls
-# in a bare `except: pass`, so an unwritable mount means every run refetches instead of
-# caching, and the visible symptom is forecast.solar rate-limiting - which looks like an API
-# problem, not a permissions one. Check `ls -n` on the host directory and match it:
-#   sudo docker compose build --build-arg PLANNER_UID=1026 --build-arg PLANNER_GID=100
-ARG PLANNER_UID=1000
-ARG PLANNER_GID=1000
-RUN set -eu; \
-    if ! getent group "${PLANNER_GID}" >/dev/null; then groupadd -g "${PLANNER_GID}" planner; fi; \
-    if ! getent passwd "${PLANNER_UID}" >/dev/null; then \
-        useradd -u "${PLANNER_UID}" -g "${PLANNER_GID}" -m planner; fi; \
-    mkdir -p /data; \
-    chown "${PLANNER_UID}:${PLANNER_GID}" /data
-USER ${PLANNER_UID}:${PLANNER_GID}
+COPY *.py plan-now.sh solar-forecast.sh entrypoint.sh ./
+RUN chmod +x plan-now.sh solar-forecast.sh entrypoint.sh \
+ && mkdir -p /data
 
 # Everything the planner writes is CWD-relative, and BT_DATA_DIR above sends plan-now.sh
-# here. A bind mount over /data replaces the ownership set above with the host's, which is
-# why the UID has to match rather than merely existing.
+# here. A bind mount over /data replaces this directory's ownership with the host's, which is
+# why there is no USER line: the image cannot know that UID at build time, and guessing it
+# wrong used to fail silently. entrypoint.sh reads the owner off the mount at startup, becomes
+# that user, and refuses to run if the result still cannot write.
 WORKDIR /data
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["/app/plan-now.sh"]

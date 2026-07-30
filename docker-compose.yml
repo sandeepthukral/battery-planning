@@ -11,13 +11,7 @@
 
 services:
   planner:
-    build:
-      context: .
-      args:
-        # Must match the owner of ./data on the host - see the Dockerfile comment. Check with
-        # `ls -n` and put the numbers in .env; a mismatch fails silently.
-        PLANNER_UID: ${PLANNER_UID:-1000}
-        PLANNER_GID: ${PLANNER_GID:-1000}
+    build: .
     image: battery-planner:latest
     environment:
       # The service alias, not the container name. Confirmed resolving on this network from a
@@ -36,10 +30,19 @@ services:
       TZ: ${BT_TZ:-Europe/Amsterdam}
       # Written by section 4, once plans are stored in InfluxDB. Harmless until then.
       #INFLUX_PLAN_BUCKET: ${INFLUX_PLAN_BUCKET:-planning}
+      # Only consulted when docker itself had to create ./data, which leaves it owned by root
+      # and therefore claimed by nobody. Otherwise the entrypoint takes the UID off the
+      # existing directory and these are ignored.
+      #PLANNER_UID: ${PLANNER_UID:-1000}
+      #PLANNER_GID: ${PLANNER_GID:-1000}
     volumes:
       # Everything the planner writes: plans/, logs/, price_cache/, pv_cache/, the raw
       # entsoe-output file and solarforecast.json. Survives a rebuild; the image holds no
       # state at all.
+      #
+      # The container starts as root, adopts this directory's owner and drops to it, so the
+      # files that appear here belong to whoever owns ./data on the host - no UID to configure
+      # and no rebuild when it changes.
       - ./data:/data
     networks: [alphaess-net]
 

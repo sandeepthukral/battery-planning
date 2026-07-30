@@ -13,6 +13,7 @@
 !requirements.txt
 !plan-now.sh
 !solar-forecast.sh
+!entrypoint.sh
 
 # Never, under any circumstances - listed again after the allowlist as a second line of
 # defence, in case a broader ! rule is added above and quietly re-admits them.

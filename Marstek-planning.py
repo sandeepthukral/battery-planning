@@ -1015,6 +1015,20 @@ def prunePVcache(keepHours=48):
 # and the next run stacks up behind it.
 HTTP_TIMEOUT=(10,30)
 
+_cacheWriteWarned=set()
+
+def warnCacheWrite(path,err):
+    # Failing to cache is not fatal - the plan is already built from the response we hold in
+    # memory. But swallowing it silently means every run refetches, and against forecast.solar's
+    # ~12 requests an hour that eventually surfaces as a rate-limit refusal with no visible
+    # connection to the real cause. Warn once per path so a persistent problem does not bury
+    # the plan in repeats.
+    if path in _cacheWriteWarned:
+        return
+    _cacheWriteWarned.add(path)
+    print("WARNING: could not write cache file %s (%s). The plan is unaffected, but nothing "
+          "will be cached, so every run refetches."%(path,err))
+
 def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
     # request the PV production forecast from forecast.solar and store in a file
     cacheFile=pvCacheFileName(groupSpec)
@@ -1049,8 +1063,8 @@ def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
                     with open(cacheFile,'wb') as cf:
                         cf.write(response.content)
                     prunePVcache()
-                except Exception:
-                    pass
+                except Exception as e:
+                    warnCacheWrite(cacheFile,e)
             else:
                 # forecast.solar reports the reason in the body; the free tier allows about
                 # 12 requests per hour per IP, which an hourly planner with two panel groups
@@ -1298,8 +1312,8 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
                 os.makedirs(cacheDir,exist_ok=True)
                 with open(cacheFile,"w") as cf:
                     cf.write(responseText)
-            except Exception:
-                pass
+            except Exception as e:
+                warnCacheWrite(cacheFile,e)
         elif os.path.exists(cacheFile):
             # refetch failed (network hiccup): fall back to whatever was cached rather than
             # returning nothing
