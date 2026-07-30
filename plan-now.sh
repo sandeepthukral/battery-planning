@@ -13,7 +13,20 @@
 # zsh. Everything below is deliberately written to work on both, because the whole point of
 # a scheduled planner is that nobody is watching it when it breaks.
 set -u
-cd "$(dirname "$0")"
+
+# Where the code lives vs. where output goes. On the Mac these are the same directory and
+# nothing changes. In the container the code is baked into the image at /app and every
+# written artefact - plans/, logs/, price_cache/, pv_cache/, the planner's own
+# entsoe-output file - belongs on the bind-mounted /data, which survives a rebuild.
+# BT_DATA_DIR is what splits them. Everything the planner writes is CWD-relative, so
+# changing directory is the whole mechanism; the scripts are then called by absolute path.
+scriptDir=$(cd "$(dirname "$0")" && pwd)
+cd "${BT_DATA_DIR:-$scriptDir}"
+
+# advise.py imports influx_source without the sys.path guard that Marstek-planning.py has,
+# so once the CWD is no longer the code directory it needs telling where to look. The
+# container also sets this, harmlessly; here it makes a Mac run with BT_DATA_DIR work too.
+export PYTHONPATH=${PYTHONPATH:-$scriptDir}
 
 # Pin the wall clock before reading it. Everything here - the plan filename, BT_START,
 # BT_STARTHOUR, the energy-tax year - comes from `date`, which follows TZ. A container
@@ -33,7 +46,7 @@ export TZ=$BT_TZ
 # The venv is a darwin build and is gitignored, so it exists on the Mac and never in the
 # container, where dependencies are installed into the image instead. Prefer it when present.
 if [ -z "${PY:-}" ]; then
-  if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=python3; fi
+  if [ -x "$scriptDir/.venv/bin/python" ]; then PY="$scriptDir/.venv/bin/python"; else PY=python3; fi
 fi
 
 # Where to reach InfluxDB. Two environments, and the difference is not cosmetic:
@@ -103,7 +116,7 @@ BT_START=$today BT_END=$tomorrow BT_STARTHOUR=$hour \
 BT_INITCHARGE=influx BT_MINSOC=10 BT_RTE=90 \
 BT_ETAX=$etax \
 BT_XMLAVAIL=N BT_OVERWRITE=Y BT_PRICE_CACHE=price_cache \
-  $PY Marstek-planning.py -s -p -u -b < /dev/null >> $log 2>&1
+  $PY "$scriptDir/Marstek-planning.py" -s -p -u -b < /dev/null >> "$log" 2>&1
 rc=$?
 
 if [ "$rc" -ne 0 ]; then
@@ -133,7 +146,7 @@ printf '%s\n' "plan written to $plan"
 # tested and dead. Detecting the shell (`if [ -n "$ZSH_VERSION" ]`) works, but it keeps a
 # silent-failure mode alive to solve a problem that disappears if the pipe does. advise.py
 # prints a few lines instantly, so there is nothing to stream.
-advise_out=$($PY advise.py --min-hours 12 "$plan" 2>&1)
+advise_out=$($PY "$scriptDir/advise.py" --min-hours 12 "$plan" 2>&1)
 advise_rc=$?
 printf '%s\n' "$advise_out" | tee -a "$log"
 if [ "$advise_rc" -ne 0 ]; then

@@ -93,8 +93,8 @@ So: one datasource, token readable on both buckets.
 
 ### What this repo needs from that one
 
-- the docker network name (expected `alphaess-collector_alphaess-net`, but compose prefixes
-  by project directory — confirm with `docker network ls | grep alphaess`)
+- ~~the docker network name~~ **confirmed 2026-07-30: `alphaess-net`** (see 2, "Which
+  network")
 - the `planning` bucket created, with retention set
 - the token above
 - a mount line in *that* repo's `docker-compose.yml` for the new dashboard JSON, alongside
@@ -322,15 +322,73 @@ side is `cp .env.example .env` plus filling in one token.
 
 ---
 
-## 2. Container
+## 2. Container — **written, build not yet run on the NAS**
+
+`Dockerfile`, `docker-compose.yml` and `.dockerignore` are committed. Everything below is
+verified as far as it can be off the NAS; the build itself needs Docker on the NAS (Docker
+Desktop is not running on the Mac, and an arm64 build would not prove anything about the
+DS220+'s x86_64 CBC binary anyway).
 
 ### Dockerfile
 
-`python:3.12-slim`, `tzdata`, non-root user, `requirements.txt`, then the `.py` files and
-`plan-now.sh` — mirroring `alphaess-collector/collector/Dockerfile`.
+`python:3.12-slim`, OS `tzdata`, `requirements.txt`, then the `.py` files and both shell
+scripts, running as a non-root user.
 
-Add a **build-time CBC smoke test** that solves a two-variable LP. x86_64 should be fine,
-but proving it at build beats discovering it at 02:05.
+**`tzdata` is installed as an OS package, not just the pip one.** They serve different
+consumers: `plan-now.sh` reads the clock with the shell's `date`, which resolves `TZ`
+against `/usr/share/zoneinfo`, while the pip package is visible only to Python's `zoneinfo`.
+Install one and not the other and the shell and the planner sit in different timezones —
+exactly the failure 1.3 exists to prevent.
+
+Two **build-time smoke tests**, because both failures would otherwise appear at 02:05 as a
+missing plan:
+
+1. CBC solves a two-variable LP and the objective is checked, not just the status. Catches a
+   solver that installs but cannot execute.
+2. `ZoneInfo("Europe/Amsterdam")` resolves. Catches a slim base without tzdata, which the
+   planner would survive — falling back to the system clock with a warning nobody reads.
+
+### The `/app` vs `/data` split
+
+Code is baked into the image at `/app`; everything written goes to the bind-mounted `/data`.
+That needed a change to `plan-now.sh`, because it used to `cd` to its own directory and
+everything the planner writes is CWD-relative.
+
+It now resolves `scriptDir`, changes to **`BT_DATA_DIR`** (defaulting to `scriptDir`, so the
+Mac is unaffected), and calls the Python entry points by absolute path. It also exports
+`PYTHONPATH=$scriptDir`, because `advise.py` imports `influx_source` **without** the
+`sys.path` guard `Marstek-planning.py` has, and that only matters once the CWD is no longer
+the code directory. `solar-forecast.sh` got the same treatment.
+
+Verified on the Mac: with `BT_DATA_DIR` set, `plans/`, `logs/`, `price_cache/`, `pv_cache/`
+and `solarforecast.json` all appear under the data directory and **nothing is written into
+the repo**; with it unset, behaviour is unchanged.
+
+### `.dockerignore` is an allowlist
+
+Deliberately `*` followed by explicit `!` rules, rather than a list of exclusions. This repo
+holds a year of household load data and a `.env`; a denylist that misses one pattern bakes
+either into an image layer, where it survives deleting the file and is readable with
+`docker history`. Simulated against the real tree: the build context is **9 files** — the six
+`.py`, `requirements.txt`, and the two shell scripts — with no `.env`, no CSV, no cache.
+
+### The UID trap
+
+The container runs as `PLANNER_UID:PLANNER_GID` (default 1000/1000, build args). This must
+match the owner of `./data` on the host, because a bind mount replaces the image's ownership
+with the host's.
+
+**A mismatch fails silently.** `Marstek-planning.py:935` and `:1179` wrap their `os.makedirs`
+in a bare `except: pass`, so an unwritable mount means every run refetches instead of
+caching. The symptom that eventually surfaces is forecast.solar **rate-limiting**, which
+reads as an API problem rather than a permissions one. Since `sudo docker compose` will
+create `./data` as root:
+
+```bash
+mkdir -p /volume1/docker/battery-planning/data      # BEFORE the first compose run
+ls -n /volume1/docker/battery-planning              # note the uid/gid on data
+# put them in .env as PLANNER_UID / PLANNER_GID, then build
+```
 
 ### docker-compose.yml
 
@@ -344,6 +402,7 @@ services:
       INFLUX_ORG: ${INFLUX_ORG:-home}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}     # read: actuals
       INFLUX_PLAN_BUCKET: ${INFLUX_PLAN_BUCKET:-planning}   # write: plans
+      BT_TZ: Europe/Amsterdam
       TZ: Europe/Amsterdam
       PYTHONPATH: /app
     volumes:
@@ -352,14 +411,60 @@ services:
 
 networks:
   alphaess-net:
-    name: alphaess-collector_alphaess-net    # confirm on the NAS
+    name: alphaess-net        # confirmed on the NAS, see below
     external: true
 ```
 
-Joining this network also inherits its **MTU 1400 cap**. That matters: the collector needed
-it because the NAS uplink drops full-size TLS handshake packets, surfacing as intermittent
-`SSL: UNEXPECTED_EOF_WHILE_READING`. The planner makes the same kind of outbound HTTPS
-calls and would hit the same intermittent failure on a default 1500-MTU network.
+### Which network — confirmed 2026-07-30
+
+This plan expected `alphaess-collector_alphaess-net`, on the reasoning that compose prefixes
+network names with the project directory. **That was wrong.** Two networks exist on the NAS
+and the live one is the *unprefixed* `alphaess-net`:
+
+```
+alphaess-collector-grafana-1        alphaess-net
+alphaess-collector-awtrix-pusher-1  alphaess-net
+alphaess-collector-collector-1      alphaess-net
+alphaess-collector-influxdb-1       alphaess-net
+```
+
+The prefixed `alphaess-collector_alphaess-net` still exists but carries no containers — a
+leftover from an earlier layout. An unprefixed name means the collector's compose file sets
+`name: alphaess-net` explicitly, or the network was created by hand and referenced as
+external. Either way, ours joins by that literal name. **Do not delete the empty one as part
+of this work**; it belongs to the collector repo to clean up.
+
+### `INFLUX_URL` depends on a service alias, not the container name
+
+The container is `alphaess-collector-influxdb-1`. `http://influxdb:8086` only works because
+compose registers the *service* name as a network-scoped DNS alias, and aliases are per
+network rather than per project — so a container from a different compose project on the same
+network resolves it too.
+
+That is the documented behaviour, but it is an assumption this whole design rests on, and it
+fails at 02:05 rather than at build time. Verify before writing the Dockerfile:
+
+```bash
+sudo docker run --rm --network alphaess-net alpine:3 getent hosts influxdb
+```
+
+If the alias is absent, fall back to the container name
+(`INFLUX_URL=http://alphaess-collector-influxdb-1:8086`) and note that it then breaks whenever
+the collector stack is recreated with a different scale suffix.
+
+### MTU
+
+Joining this network inherits whatever MTU it carries. The collector needed **1400** because
+the NAS uplink drops full-size TLS handshake packets, surfacing as intermittent
+`SSL: UNEXPECTED_EOF_WHILE_READING`. The planner makes the same kind of outbound HTTPS calls
+to forecast.solar and EnergyZero and would hit the same failure on a default 1500-MTU network.
+
+Still to confirm on the NAS — if `alphaess-net` is *not* capped, set it explicitly on our side:
+
+```bash
+sudo docker network inspect alphaess-net \
+  --format 'mtu={{index .Options "com.docker.network.driver.mtu"}}'
+```
 
 ### Working directory and data
 

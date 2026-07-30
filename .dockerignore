@@ -1,0 +1,30 @@
+# Allowlist, not a denylist, and deliberately so.
+#
+# This repo holds a year of household load data and a .env with credentials. A denylist that
+# forgets one pattern bakes either of those into an image layer, where it survives deletion
+# of the file and is trivially readable with `docker history` / `docker save`. Starting from
+# "send nothing" means a new data file added later is excluded by default rather than
+# included by accident.
+#
+# Anything the container needs at runtime must be added here explicitly.
+*
+
+!*.py
+!requirements.txt
+!plan-now.sh
+!solar-forecast.sh
+
+# Never, under any circumstances - listed again after the allowlist as a second line of
+# defence, in case a broader ! rule is added above and quietly re-admits them.
+.env
+.venv/
+*.csv
+*.excluded.json
+price_cache/
+pv_cache/
+plans/
+logs/
+results/
+results-raw-baseline/
+entsoe-output*.txt
+solarforecast.json

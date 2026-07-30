@@ -1,0 +1,54 @@
+# One planning pass, then exit. Run it from DSM Task Scheduler every 3 hours:
+#
+#   sudo docker compose run --rm planner
+#
+# Not `up -d`: there is no server here and nothing to keep alive. A restart policy on a
+# batch job would turn a transient failure into a hot loop against forecast.solar's
+# ~12 requests/hour budget.
+#
+# Settings come from a .env file beside this one, created by hand on the NAS from
+# .env.example. It is gitignored and never travels with the clone.
+
+services:
+  planner:
+    build:
+      context: .
+      args:
+        # Must match the owner of ./data on the host - see the Dockerfile comment. Check with
+        # `ls -n` and put the numbers in .env; a mismatch fails silently.
+        PLANNER_UID: ${PLANNER_UID:-1000}
+        PLANNER_GID: ${PLANNER_GID:-1000}
+    image: battery-planner:latest
+    environment:
+      # The service alias, not the container name. Confirmed resolving on this network from a
+      # foreign compose project: `influxdb` -> 172.26.0.2. The container is really called
+      # alphaess-collector-influxdb-1; using that name instead would break whenever the
+      # collector stack is recreated with a different suffix.
+      INFLUX_URL: ${INFLUX_URL:-http://influxdb:8086}
+      # No default on purpose. An absent token would otherwise surface much later as a
+      # refusal inside the planner; this stops the container before it starts.
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set INFLUX_TOKEN in .env beside this file}
+      INFLUX_ORG: ${INFLUX_ORG:-home}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
+      # Both halves of the clock, from one knob. BT_TZ drives Marstek-planning.py's own
+      # wall-clock helpers; TZ drives the shell `date` calls in plan-now.sh.
+      BT_TZ: ${BT_TZ:-Europe/Amsterdam}
+      TZ: ${BT_TZ:-Europe/Amsterdam}
+      # Written by section 4, once plans are stored in InfluxDB. Harmless until then.
+      #INFLUX_PLAN_BUCKET: ${INFLUX_PLAN_BUCKET:-planning}
+    volumes:
+      # Everything the planner writes: plans/, logs/, price_cache/, pv_cache/, the raw
+      # entsoe-output file and solarforecast.json. Survives a rebuild; the image holds no
+      # state at all.
+      - ./data:/data
+    networks: [alphaess-net]
+
+networks:
+  alphaess-net:
+    # Confirmed on the NAS 2026-07-30. NOT alphaess-collector_alphaess-net, which also exists
+    # but is an empty leftover - the collector's compose sets this name explicitly, so it is
+    # unprefixed. Joining it also inherits its MTU of 1400, which the collector needed
+    # because the NAS uplink drops full-size TLS handshake packets; the planner makes the
+    # same kind of outbound HTTPS calls and would hit the same intermittent failure at 1500.
+    name: alphaess-net
+    external: true
