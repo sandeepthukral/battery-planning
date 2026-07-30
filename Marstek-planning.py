@@ -1149,10 +1149,20 @@ def parsePVforecastIntoList(groupSpec):
                 if debug: print("forecast ",i)
     return forecastList
 
+# Uncalibrated forecast.solar output per interval, keyed by the interval's UTC start string,
+# summed over the panel groups. Filled by mergeForecastWithPricelist() and read by
+# writePlanToInflux(); see the comment there for why it is worth carrying separately.
+pvForecastRawWh={}
+
 def parsePricesIntoList(runDate,hourAverage=False,local_tz="Europe/Amsterdam"):
     # process prices into a list, either per hour or per 15-minute interval
     loadStartDate=datetime.strftime(runDate,'%Y%m%d')
     loadEndDate=datetime.strftime(runDate+timedelta(days=1),'%Y%m%d')
+
+    # A fresh price list means a fresh set of forecasts; in a multi-day backtest this function
+    # is called once per run day, and stale keys would otherwise accumulate across them.
+    global pvForecastRawWh
+    pvForecastRawWh={}
 
     priceList = []
     quarter_times = []
@@ -1427,7 +1437,7 @@ def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
     # merge forecast onto pricelist as separate fields
     # applyCalibration must stay False for measured/historical values: the calibration
     # corrects forecast.solar's bias, and actuals carry no such bias
-    global priceList
+    global priceList,pvForecastRawWh
     for intervalNr,interval in enumerate(priceList):
         intervalDate=interval[3][0:10] # date of local time in pricelist
         intervalHr=interval[3][11:13]  # hour of local time in pricelist
@@ -1435,6 +1445,17 @@ def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
             pvForecast=findForecast(intervalDate,intervalHr,forecastList)
         else:
             pvForecast=round(findForecast(intervalDate,intervalHr,forecastList)/4) # some rounding is o.k.
+        # Keep the uncalibrated number, summed across panel groups the same way the calibrated
+        # one is. Without it only the product of three multipliers is ever recorded, and
+        # forecast.solar's own accuracy cannot be separated from the corrections applied to it
+        # - which is exactly what pvOverallCalibration has to be fitted against. The raw
+        # responses live in pv_cache/ for 48 hours and are then pruned, so every run that does
+        # not record this loses the comparison permanently.
+        #
+        # Keyed by the interval's UTC start, not by its position: dropHistoryFromPricelist()
+        # pops from the front and dropUnpublishedFromPricelist() filters, both after this runs,
+        # so an index would quietly come to mean a different interval.
+        pvForecastRawWh[interval[2]]=pvForecastRawWh.get(interval[2],0)+pvForecast
         if applyCalibration and pvCalibrateForecast:
             pvForecast=round(pvForecast*pvElevationCalibration(intervalDate,intervalHr)
                              *pvOverallCalibration*pvPlanningFactor)
@@ -1937,6 +1958,14 @@ def writePlanToInflux(schedule,planRun):
              "price_sell":priceList[nr][8],
              # The two panel groups are one roof as far as any dashboard is concerned.
              "pv_forecast_wh":priceList[nr][4]+priceList[nr][5],
+             # The same forecast before pvElevationCalibration(), pvOverallCalibration and
+             # pvPlanningFactor are applied. Storing only the product makes forecast accuracy
+             # and correction accuracy indistinguishable: an evening hour can read 74% under
+             # while the raw forecast was 56% under and the elevation curve supplied the rest.
+             # pvOverallCalibration is still an unfitted 1.00 and has to be fitted against the
+             # raw number, so without this the fit has no input that outlives the 48-hour
+             # pv_cache retention.
+             "pv_forecast_raw_wh":pvForecastRawWh.get(priceList[nr][2],0),
              "load_forecast_wh":priceList[nr][6]},
             when))
     if not lines:

@@ -128,6 +128,7 @@ def collect(day):
             "planDischarge": p.get("discharge_wh", 0.0),
             "planSoc": p.get("soc_wh"),
             "planPv": p.get("pv_forecast_wh"),
+            "planPvRaw": p.get("pv_forecast_raw_wh"),
             "planLoad": p.get("load_forecast_wh"),
             "actImport": max(grid[t], 0.0),
             "actExport": max(-grid[t], 0.0),
@@ -300,11 +301,20 @@ def sectionForecast(rows):
     if not pvRows and not loadRows:
         print("   nothing scored.\n")
         return
+    rawRows = [r for r in pvRows if r.get("planPvRaw") is not None]
     if pvRows:
         f = sum(r["planPv"] for r in pvRows) / 1000.0
         a = sum(r["actPv"] for r in pvRows) / 1000.0
         print("   PV     forecast %6.2f kWh   measured %6.2f kWh   %s"
               % (f, a, pctErr(f, a)))
+        if rawRows:
+            # The planning forecast is the raw one times three corrections. Reporting only the
+            # product cannot say whether a miss was forecast.solar's or the calibration's, and
+            # those call for opposite fixes.
+            rf = sum(r["planPvRaw"] for r in rawRows) / 1000.0
+            ra = sum(r["actPv"] for r in rawRows) / 1000.0
+            print("   PV raw forecast %6.2f kWh   measured %6.2f kWh   %s   (before calibration)"
+                  % (rf, ra, pctErr(rf, ra)))
     if loadRows:
         f = sum(r["planLoad"] for r in loadRows) / 1000.0
         a = sum(r["actLoad"] for r in loadRows) / 1000.0
@@ -312,13 +322,21 @@ def sectionForecast(rows):
               % (f, a, pctErr(f, a)))
     if pvRows:
         print()
-        print("   PV by hour (Wh)   forecast   measured   error")
+        header = "   PV by hour (Wh)   forecast   measured   error"
+        if rawRows:
+            header += "          raw   raw error"
+        print(header)
         for hour, group in hourly(pvRows).items():
             f = sum(r["planPv"] for r in group)
             a = sum(r["actPv"] for r in group)
             if f < 1 and a < 1:
                 continue
-            print("   %s              %8.0f   %8.0f   %s" % (hour, f, a, pctErr(f, a)))
+            line = "   %s              %8.0f   %8.0f   %-12s" % (hour, f, a, pctErr(f, a))
+            withRaw = [r for r in group if r.get("planPvRaw") is not None]
+            if withRaw:
+                rf = sum(r["planPvRaw"] for r in withRaw)
+                line += " %8.0f   %s" % (rf, pctErr(rf, sum(r["actPv"] for r in withRaw)))
+            print(line)
         print()
         print("   A daily total alone would hide the failure mode already seen once: on")
         print("   2026-07-29 forecast.solar missed a sunny evening by 43%, concentrated in a")
