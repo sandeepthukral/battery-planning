@@ -2138,7 +2138,13 @@ def main():
     runHour=starthour
     # Identifies this run in InfluxDB. Taken once, before the loop, so every interval of one
     # plan carries the same tag - that is what "show me the current plan" filters on.
-    planRunStamp=(datetime.now(planningTZ) if planningTZ else localNow()).isoformat(timespec="seconds")
+    #
+    # UTC, not local. The tag is a string, and picking "the newest plan" means sorting those
+    # strings - a tag carries no other order. Local time breaks that exactly once a year: on
+    # the October DST night the 02:05 run is stamped +02:00 and the 02:05 run an hour later
+    # +01:00, which sorts LOWER despite being later, so every consumer would quietly show the
+    # stale plan until 05:05. In UTC, lexicographic order is chronological order, always.
+    planRunStamp=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 
     while runDate<endDateObject or runDate==startDateObject:
 
