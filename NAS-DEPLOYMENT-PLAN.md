@@ -865,13 +865,21 @@ the report with it or the reverse. Same shape as `plan.sh` — its own PATH line
 directory, its own stale-lock timeout (30 minutes here; the report is a handful of queries).
 
 - **General**: user `root`
-- **Schedule**: Daily, **08:10**, no repeat
+- **Schedule**: Daily, **06:10**, no repeat
 - **Task Settings → Run command**: `/volume1/docker/battery-planning/scripts/report.sh`
 
-**08:10, not 00:05.** The last plan of a day is written at 23:05, and the report scores each
+**06:10, not 00:05.** The last plan of a day is written at 23:05, and the report scores each
 interval against the plan in force for it — a run just after midnight would be racing the day
-it is trying to score. 08:10 also lands just after the 08:05 planning run, and the two locks
-are separate so they cannot deadlock if that one runs long.
+it is trying to score. By 06:10 yesterday is closed on both sides: every plan for it exists,
+and the collector has been writing actuals continuously since. The report is then finished
+before the user is awake, which is the whole point of a day-after report.
+
+06:10 also sits in the quietest part of the planning schedule — an hour after the 05:05 run,
+two before the 08:05 one. This document first said 08:10, for landing "just after the 08:05
+planning run". That had it backwards: 08:10 is the slot *most* likely to overlap a planning
+run, not least. The separate locks mean an overlap would have been survivable rather than
+harmful, which is exactly why the error was worth catching on reasoning instead of on a
+symptom — it would never have produced one.
 
 The date is computed in the script with `TZ=Europe/Amsterdam` and passed to `report_day.py`
 explicitly, rather than letting the container resolve "yesterday" on its own. The output file
