@@ -177,11 +177,39 @@ def _query(flux):
                  "Accept": "application/csv"},
         timeout=30)
     resp.raise_for_status()
+    return _parseAnnotatedCsv(resp.text)
+
+
+def _parseAnnotatedCsv(text):
+    """Parse InfluxDB's annotated CSV, which is several tables in one document.
+
+    Not csv.DictReader over the whole response. Influx starts a new annotation block --
+    #datatype, #group, #default, then a fresh header row -- every time the result schema
+    changes, and DictReader binds the first header for the whole document. The later header
+    rows then arrive as data, giving a row whose _time is the string "_time"; and if the
+    schemas really do differ, every data row after the change is read against the wrong
+    column names while still looking like a perfectly ordinary row.
+
+    Latent until 2026-07-30, when adding pv_forecast_raw_wh to the plan measurement meant a
+    single query could span runs written before and after the change. Handling the blocks
+    is what makes adding a field to a measurement a non-event.
+    """
     rows = []
-    for row in _csv.DictReader(io.StringIO(resp.text)):
-        if not row or row.get("_time") in (None, "") and row.get("_value") in (None, ""):
+    header = None
+    for raw in _csv.reader(io.StringIO(text)):
+        if not raw or all(cell == "" for cell in raw):
+            header = None                       # blank line ends a block
             continue
-        if (row.get("result") or "").startswith("#"):
+        if raw[0].startswith("#"):              # annotation line
+            continue
+        # A header row carries the literal "result" in the column of that name; a data row
+        # carries the yield name there. Checked as well as the blank-line reset because the
+        # first block has no blank line before it.
+        if header is None or (len(raw) > 1 and raw[1] == "result"):
+            header = raw
+            continue
+        row = dict(zip(header, raw))
+        if row.get("_time") in (None, "") and row.get("_value") in (None, ""):
             continue
         rows.append(row)
     return rows
