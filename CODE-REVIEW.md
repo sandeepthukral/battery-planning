@@ -565,16 +565,24 @@ first.
 
 ### Stage 1 — correctness and silent failure
 
-- [ ] **C1a** `advise.py`: an empty plan fails `--min-hours` instead of passing
-- [ ] **C1b** `LPoptimization()` refuses `nrIntervals == 0` with a named exit code
-- [ ] **C2** `dropHistoryFromPricelist()` clamps and warns instead of `IndexError`
-- [ ] **C3** `buildInitialPlanningList()` uses `pricePublishHour`, not a second literal 15
-- [ ] **C4** `hourlyAvgProfileWh()` snaps to local midnight — closes the `TODO.md` item and
+- [x] **C1a** `advise.py`: an empty plan fails `--min-hours` instead of passing
+- [x] **C1b** `LPoptimization()` refuses `nrIntervals == 0` with a named exit code
+- [x] **C2** `dropHistoryFromPricelist()` clamps and warns instead of `IndexError`
+- [x] **C3** `buildInitialPlanningList()` uses `pricePublishHour`, not a second literal 15
+      (no isolated test - see the note below the checklist)
+- [x] **C4** `hourlyAvgProfileWh()` snaps to local midnight — closes the `TODO.md` item and
       the uneven-sampling bias with it
-- [ ] **C5** `getSOC()` raises on a missing hour instead of returning the last interval
-- [ ] **C7** Live path asserts `BT_START` agrees with the planner's own `today`
-- [ ] **E1** `report.sh` moves the report into place only on success
-- [ ] **E3** `plan-now.sh` checks the plan file exists before `mv`
+- [x] **C5** `getSOC()` raises on a missing hour instead of returning the last interval
+- [x] **C7** Live path asserts `BT_START` agrees with the planner's own `today`
+- [x] **E1** `report.sh` moves the report into place only on success
+- [x] **E3** `plan-now.sh` checks the plan file exists before `mv`
+
+Stage 1 done. One honest gap: **C3 has no automated test.** `buildInitialPlanningList()`
+reaches ENTSOE/EnergyZero and reads `today`/`runDate` module globals with no A2-style
+parametrization, so testing the one-line fix in isolation would mean mocking well past what
+this fix touches. The line was read back in context to confirm it matches `pricePublishHour`
+correctly; that is verification, not a test, and it is exactly the D7/D8 problem (that
+function does too much) making itself felt. Worth returning to once Stage 3 decomposes it.
 
 ### Stage 2 — one source of truth
 

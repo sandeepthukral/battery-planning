@@ -437,16 +437,28 @@ def hourlyEnergyWh(field, start, stop, min_coverage=0.5, clamp_negative=False):
 
 
 def hourlyAvgProfileWh(field=FIELD_LOAD, days=7, weightIncrease=0.0):
-    """Average energy per hour-of-day over the last `days`, as [["HH", Wh], ...].
+    """Average energy per hour-of-day over the last `days` COMPLETE local days, as
+    [["HH", Wh], ...].
 
     Matches the shape Marstek-planning.py's calcHourlyAvgUsage() returns. More
     recent days can be weighted up via weightIncrease (0 = flat average), mirroring
     the original Domoticz behaviour.
+
+    stop is snapped to local midnight, not left at "now". Snapping only the hour (the
+    previous behaviour) made the window run from partway through today back to the
+    same wall-clock moment `days` ago - which spans days+1 CALENDAR dates whenever
+    "now" isn't exactly midnight, and gives hours after "now" one fewer sample than
+    hours before it. `days=7` returning 8 distinct dates was that bug, not an
+    off-by-one in a comparison. Ending at midnight instead means every hour-of-day
+    bucket is built from the same `days` complete days - today's partial data is
+    excluded on purpose, since a half-covered "today" would reintroduce the same
+    unevenness this fixes.
     """
     now = datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.now(timezone.utc)
-    start = (now - timedelta(days=days)).replace(minute=0, second=0, microsecond=0)
+    stop = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = stop - timedelta(days=days)
     # load and PV cannot be negative; the sign-carrying fields must not be clamped
-    hours = hourlyEnergyWh(field, start, now,
+    hours = hourlyEnergyWh(field, start, stop,
                            clamp_negative=field in (FIELD_LOAD, FIELD_PV))
 
     totals = [0.0] * 24

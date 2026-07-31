@@ -213,6 +213,15 @@ if __name__ == "__main__":
         rows = readPlan(path)
         if not rows:
             print("no plan rows in %s" % path)
+            if minHours:
+                # An empty plan is the SHORTEST possible horizon (0h), not a case with
+                # nothing to check. Skipping the --min-hours guard here is exactly the
+                # gap that let a total input failure (both price sources empty,
+                # LPoptimization() solving zero intervals as "Optimal") look identical
+                # to a healthy run: plan-now.sh calls this with --min-hours precisely to
+                # catch that, and a bare `continue` let it through with exit 0.
+                print("  ERROR: 0 plan rows, need >= %.1fh (empty plan - see the planner's own output above)" % minHours)
+                tooShort = True
             continue
         render(rows, path, showIdle="--all" in flags)
         if "--actuals" in flags:

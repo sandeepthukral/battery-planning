@@ -11,6 +11,8 @@ Indices 4-8 are the ones LPoptimization() reads (forecastDirectIndex .. sellPric
 This installation has no direct-coupled group, so pvDirect (index 4) is always 0 - see
 the pvGroups comment block at the top of Marstek-planning.py.
 """
+import pytest
+
 # `planner` fixture (loads Marstek-planning.py fresh per test) comes from conftest.py.
 
 
@@ -136,6 +138,14 @@ def test_energy_balance_holds_every_interval(planner):
         lhs = pv + r["import"] + r["discharge"]
         rhs = load + r["export"] + r["charge"]
         assert abs(lhs - rhs) <= 1, "interval %d: %d != %d" % (t, lhs, rhs)
+
+
+def test_refuses_empty_price_list(planner):
+    """CODE-REVIEW.md C1b: an empty priceList used to solve as "Optimal" with an empty
+    schedule, indistinguishable from a healthy short plan. It must refuse instead."""
+    with pytest.raises(SystemExit) as excinfo:
+        planner.LPoptimization(priceList=[], initialCharge=14000, **COMMON)
+    assert excinfo.value.code == 5
 
 
 def test_live_path_unaffected_by_default_arguments(planner):

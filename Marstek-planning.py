@@ -487,6 +487,24 @@ def getUserInput():
     # wrong starting charge is worse than not planning it.
     initialChargeSpec=_ask("BT_INITCHARGE","Enter initial charge in Wh, or 'influx' (default=0) :","0")
     if str(initialChargeSpec).strip().lower()=="influx":
+        # BT_INITCHARGE=influx is what marks this as a LIVE run, not a backtest - only
+        # a scheduled run asks for the real SOC. It is also where a midnight race would
+        # bite: plan-now.sh computes BT_START from the shell's own `date` before this
+        # process starts, and this file separately computes its own `today` (see the
+        # "Wall clock" block) at import time. A run that straddles midnight between
+        # those two moments would have BT_START one day behind `today`, which sends
+        # buildInitialPlanningList() down the HISTORICAL branch instead of the live
+        # one - reading BACKTEST_CSV (a year-old file on the Mac, planned on silently;
+        # absent entirely in the container, so at least loud there) instead of fetching
+        # a forecast, and skipping writePlanToInflux() entirely. Refusing here is the
+        # same call as the SOC refusal two lines below: a live run built on the wrong
+        # day is worse than one that does not run.
+        if datetime.strptime(startdate,'%Y%m%d').date()!=today:
+            print("ERROR: BT_INITCHARGE=influx (a live run) but BT_START=%s does not match "
+                  "today (%s). This is the midnight race between the shell's `date` and "
+                  "this process's own clock - see the comment above. Refusing to plan."
+                  %(startdate,todayString))
+            raise SystemExit(6)
         responseResult,chargeLevel=getBatteryChargeLevel()
         if not responseResult or chargeLevel is None:
             print("ERROR: BT_INITCHARGE=influx but the current SOC could not be read. Refusing to plan.")
@@ -1530,8 +1548,18 @@ def dropHistoryFromPricelist(runHour):
         maxDrop=runHour
     else:
         maxDrop=4*runHour
-    for interval in range(maxDrop):
-        priceList.pop(0)
+    # pop(0) in a loop would raise IndexError the moment the price fetch returns fewer
+    # intervals than maxDrop (a partial EnergyZero response, or a late-day run that
+    # only got the back half of the day) - a traceback that names neither the cause
+    # nor the run hour. Clamp instead, and say so: dropping fewer than requested means
+    # the plan is about to start from a shorter horizon than intended, which is worth
+    # knowing even though it is not fatal on its own.
+    actualDrop=min(maxDrop,len(priceList))
+    if actualDrop<maxDrop:
+        print("WARNING: expected to drop %d interval(s) of history before hour %d, "
+              "but only %d were available - the price fetch returned fewer intervals "
+              "than expected."%(maxDrop,runHour,actualDrop))
+    del priceList[:actualDrop]
 
 def dropUnpublishedFromPricelist(runDate):
     # Hide prices that had not been published yet at the simulated moment. Day-ahead prices
@@ -1559,13 +1587,20 @@ def dropExcludedFromPricelist():
     priceList=[interval for interval in priceList if interval[3][0:10] not in excluded]
 
 def getSOC(findHour,schedule):
-    # find the SOC for the given hour
-    # searching backwards
-    checkRecord=len(priceList)
-    while int(priceList[checkRecord-1][3][11:13])!=findHour and checkRecord>0:
-        checkRecord+=-1
-    SOC=schedule[checkRecord-1]["soc"]
-    return SOC
+    # find the SOC for the given hour, searching backwards from the end of the window.
+    #
+    # Rewritten because the previous version, on no match, let checkRecord reach 0 and
+    # then indexed priceList[checkRecord-1] == priceList[-1] - Python wraps a negative
+    # index to the END of the list, so "not found" silently read back the LAST interval
+    # instead of failing. Used at the multi-day backtest boundary to carry SoC into the
+    # next day (main(), around the "ready for next runDate" line): a day whose price
+    # list does not reach findHour would have started the next day from the wrong
+    # charge, with every later day inheriting the error and nothing reporting it.
+    for checkRecord in range(len(priceList)-1,-1,-1):
+        if int(priceList[checkRecord][3][11:13])==findHour:
+            return schedule[checkRecord]["soc"]
+    raise ValueError("getSOC: no interval for hour %d in priceList (%d interval(s))"
+                      %(findHour,len(priceList)))
 
 def buildInitialPlanningList():
     # build complete list with prices, PV, usage and empty fields
@@ -1582,7 +1617,15 @@ def buildInitialPlanningList():
         if runDate.date()==today:
             currentTime=localNow()
             currentHour=currentTime.hour
-            if currentHour>=15:
+            # Was a hardcoded 15 here, disagreeing with pricePublishHour=13 - the
+            # constant every comment in this project (plan-now.sh, TODO.md, the
+            # cadence table) already treats as when tomorrow's day-ahead publishes.
+            # Between 13:00 and 15:00 this expected only 24 intervals when 48 were
+            # really available, which happens to be harmless today only because the
+            # check merely decides whether to bother falling back to EnergyZero - but
+            # the 14:05 run's entire purpose is to be the first to see tomorrow, and an
+            # under-expectation here is exactly the condition that check exists to catch.
+            if currentHour>=pricePublishHour:
                 expectedIntervals=48
             else:
                 expectedIntervals=24
@@ -1831,6 +1874,17 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     zeroGridCharge = _fallback("zeroGridCharge", zeroGridCharge)
 
     nrIntervals = len(priceList)
+    if nrIntervals == 0:
+        # CBC solves a problem with zero variables as "Optimal" and returns an empty
+        # schedule, which looks exactly like a healthy but very short plan everywhere
+        # downstream: outputOptimisationResult() writes a header-only file, plan-now.sh
+        # renames it into plans/, and only advise.py's --min-hours guard stood between
+        # that and a scheduled run reporting success. A total input failure (both
+        # ENTSOE and EnergyZero returning nothing) should look like a failure here,
+        # at the source, not rely on a downstream check to catch it.
+        print("ERROR: no price intervals to plan - refusing to solve an empty problem.")
+        print("       Both price sources (ENTSOE, EnergyZero) returned nothing for this window.")
+        raise SystemExit(5)
 
     # BATTERY PARAMETERS, RTE split into equal parts for charge and discharge
     Effcharge = onewayEff
