@@ -45,3 +45,33 @@ def test_healthy_plan_passes_min_hours_guard(tmp_path):
     )
     result = _run(["--min-hours", "1", str(plan)])
     assert result.returncode == 0, "stdout:\n%s" % result.stdout
+
+
+# --- argparse footguns (CODE-REVIEW.md D9) ---------------------------------------------
+
+
+def test_min_hours_with_no_value_fails_cleanly(tmp_path):
+    """Previously: rawArgs.index("--min-hours"); rawArgs[i+1] raised a bare
+    IndexError with a traceback if --min-hours was the last argument."""
+    plan = tmp_path / "plan.txt"
+    plan.write_text("x")
+    result = _run(["--min-hours"])
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "error" in result.stderr.lower()
+
+
+def test_min_hours_with_non_numeric_value_fails_cleanly(tmp_path):
+    """Previously: float(rawArgs[i+1]) raised a bare ValueError with a traceback."""
+    plan = tmp_path / "plan.txt"
+    plan.write_text("x")
+    result = _run(["--min-hours", "not-a-number", str(plan)])
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "error" in result.stderr.lower()
+
+
+def test_no_arguments_prints_docstring_and_exits_2():
+    result = _run([])
+    assert result.returncode == 2
+    assert "Turn a Marstek-planning.py plan table" in result.stdout

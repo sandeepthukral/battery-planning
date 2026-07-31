@@ -131,3 +131,41 @@ def test_intervals_per_hour_defaults_to_the_module_global(planner):
     assert planner.intervalsPerHour() == 1
     planner.hourAvgPlanning = False
     assert planner.intervalsPerHour() == 4
+
+
+# --- _resolveInitialCharge(): D7 -------------------------------------------------------
+# Split out of getUserInput() so it can be tested on its own, without driving the whole
+# prompt sequence - and so a test can verify getBatteryChargeLevel() (the network call)
+# is never even ATTEMPTED when the midnight-race guard fires first.
+
+
+def test_plain_number_is_returned_as_is(planner):
+    assert planner._resolveInitialCharge("5000", planner.todayString, 27900) == 5000
+
+
+def test_influx_reads_the_battery_charge_level(planner, monkeypatch):
+    monkeypatch.setattr(planner, "getBatteryChargeLevel", lambda: (True, 13500.0))
+    result = planner._resolveInitialCharge("influx", planner.todayString, 27900)
+    assert result == 13500
+
+
+def test_influx_is_case_and_whitespace_insensitive(planner, monkeypatch):
+    monkeypatch.setattr(planner, "getBatteryChargeLevel", lambda: (True, 13500.0))
+    assert planner._resolveInitialCharge(" Influx ", planner.todayString, 27900) == 13500
+
+
+def test_influx_refuses_when_BT_START_disagrees_with_today(planner, monkeypatch):
+    called = []
+    monkeypatch.setattr(planner, "getBatteryChargeLevel", lambda: called.append(1) or (True, 1.0))
+    yesterday = planner.today - timedelta(days=1)
+    with pytest.raises(SystemExit) as excinfo:
+        planner._resolveInitialCharge("influx", yesterday.strftime("%Y%m%d"), 27900)
+    assert excinfo.value.code == 6
+    assert called == [], "getBatteryChargeLevel() (the network call) must not run when the date guard fires first"
+
+
+def test_influx_refuses_when_soc_cannot_be_read(planner, monkeypatch):
+    monkeypatch.setattr(planner, "getBatteryChargeLevel", lambda: (False, None))
+    with pytest.raises(SystemExit) as excinfo:
+        planner._resolveInitialCharge("influx", planner.todayString, 27900)
+    assert excinfo.value.code == 4

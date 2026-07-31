@@ -478,6 +478,45 @@ def _ask(envname, prompt, default):
         return default
     return input(prompt) or default
 
+def _resolveInitialCharge(initialChargeSpec,startdate,ratedBatteryCapacity):
+    """The one part of getUserInput() that can reach the network and exit the process
+    (CODE-REVIEW.md D7) - split out so "read configuration" and "fetch the live SoC"
+    are two distinguishable jobs, not folded into one function that quietly does both.
+
+    'influx' (case-insensitive): read the real battery SoC from InfluxDB - what a
+    scheduled LIVE run needs, and the value BT_INITCHARGE=influx marks. Refuses
+    (does not guess) rather than plan from a wrong starting charge. Anything else:
+    a plain number, what a backtest wants - a fixed, known starting point.
+    """
+    if str(initialChargeSpec).strip().lower()!="influx":
+        return int(initialChargeSpec)
+    # BT_INITCHARGE=influx is what marks this as a LIVE run, not a backtest - only
+    # a scheduled run asks for the real SOC. It is also where a midnight race would
+    # bite: plan-now.sh computes BT_START from the shell's own `date` before this
+    # process starts, and this file separately computes its own `today` (see the
+    # "Wall clock" block) at import time. A run that straddles midnight between
+    # those two moments would have BT_START one day behind `today`, which sends
+    # buildInitialPlanningList() down the HISTORICAL branch instead of the live
+    # one - reading BACKTEST_CSV (a year-old file on the Mac, planned on silently;
+    # absent entirely in the container, so at least loud there) instead of fetching
+    # a forecast, and skipping writePlanToInflux() entirely. Refusing here is the
+    # same call as the SOC refusal two lines below: a live run built on the wrong
+    # day is worse than one that does not run.
+    if datetime.strptime(startdate,'%Y%m%d').date()!=today:
+        print("ERROR: BT_INITCHARGE=influx (a live run) but BT_START=%s does not match "
+              "today (%s). This is the midnight race between the shell's `date` and "
+              "this process's own clock - see the comment above. Refusing to plan."
+              %(startdate,todayString))
+        raise SystemExit(6)
+    responseResult,chargeLevel=getBatteryChargeLevel()
+    if not responseResult or chargeLevel is None:
+        print("ERROR: BT_INITCHARGE=influx but the current SOC could not be read. Refusing to plan.")
+        raise SystemExit(4)
+    initialCharge=int(round(chargeLevel))
+    print("initial charge from InfluxDB : %d Wh (%.1f%% of %d Wh)"%(
+        initialCharge,100.0*initialCharge/ratedBatteryCapacity,ratedBatteryCapacity))
+    return initialCharge
+
 def getUserInput():
     # get user input, with limited (!!) input validation, only used in standalone mode
     # every prompt can be pre-set via an environment variable for scripted batch runs
@@ -488,37 +527,9 @@ def getUserInput():
     ratedBatteryCapacity=int(_ask("BT_CAP","Enter rated capacity in Wh (default %d) :"%ratedBatteryCapacity,ratedBatteryCapacity))
     # standalone mode normally takes a fixed starting charge, which is what a backtest wants.
     # A scheduled live run must start from the battery as it actually is, so BT_INITCHARGE=influx
-    # reads the current SOC instead. It refuses rather than guessing: planning a real day from a
-    # wrong starting charge is worse than not planning it.
+    # reads the current SOC instead - see _resolveInitialCharge() for why that is its own function.
     initialChargeSpec=_ask("BT_INITCHARGE","Enter initial charge in Wh, or 'influx' (default=0) :","0")
-    if str(initialChargeSpec).strip().lower()=="influx":
-        # BT_INITCHARGE=influx is what marks this as a LIVE run, not a backtest - only
-        # a scheduled run asks for the real SOC. It is also where a midnight race would
-        # bite: plan-now.sh computes BT_START from the shell's own `date` before this
-        # process starts, and this file separately computes its own `today` (see the
-        # "Wall clock" block) at import time. A run that straddles midnight between
-        # those two moments would have BT_START one day behind `today`, which sends
-        # buildInitialPlanningList() down the HISTORICAL branch instead of the live
-        # one - reading BACKTEST_CSV (a year-old file on the Mac, planned on silently;
-        # absent entirely in the container, so at least loud there) instead of fetching
-        # a forecast, and skipping writePlanToInflux() entirely. Refusing here is the
-        # same call as the SOC refusal two lines below: a live run built on the wrong
-        # day is worse than one that does not run.
-        if datetime.strptime(startdate,'%Y%m%d').date()!=today:
-            print("ERROR: BT_INITCHARGE=influx (a live run) but BT_START=%s does not match "
-                  "today (%s). This is the midnight race between the shell's `date` and "
-                  "this process's own clock - see the comment above. Refusing to plan."
-                  %(startdate,todayString))
-            raise SystemExit(6)
-        responseResult,chargeLevel=getBatteryChargeLevel()
-        if not responseResult or chargeLevel is None:
-            print("ERROR: BT_INITCHARGE=influx but the current SOC could not be read. Refusing to plan.")
-            raise SystemExit(4)
-        initialCharge=int(round(chargeLevel))
-        print("initial charge from InfluxDB : %d Wh (%.1f%% of %d Wh)"%(
-            initialCharge,100.0*initialCharge/ratedBatteryCapacity,ratedBatteryCapacity))
-    else:
-        initialCharge=int(initialChargeSpec)
+    initialCharge=_resolveInitialCharge(initialChargeSpec,startdate,ratedBatteryCapacity)
     minBatterySOCPct=int(_ask("BT_MINSOC","Enter minimum SOC in percent (default 12) :",12))
     maxChargeSpeed=int(_ask("BT_MAXCHG","Enter max charge speed in Watt (default %d) :"%maxChargeSpeed,maxChargeSpeed))
     maxDischargeSpeed=int(_ask("BT_MAXDIS","Enter max discharge speed in Watt (default %d) :"%maxDischargeSpeed,maxDischargeSpeed))
@@ -1415,18 +1426,13 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
 
     return result
 
-def findForecast(intervalDate,intervalHr,forecastList):
-    # find forecast of a specific hour in the list
-    notFound=True
-    nrElements=len(forecastList)
-    elementNr=0
-    forecastWh=0
-    while notFound and elementNr<nrElements:
-        if forecastList[elementNr][1]==intervalDate and forecastList[elementNr][2]==intervalHr:
-            notFound=False
-            forecastWh=forecastList[elementNr][3]
-        elementNr+=1
-    return forecastWh
+def _buildLookupTable(rows,keyIndices,valueIndex):
+    # rows -> {key: value}, key the tuple of fields at keyIndices. Built ONCE so a
+    # per-interval lookup is O(1) instead of the O(n) linear scan this replaces,
+    # repeated once per priceList interval (CODE-REVIEW.md D3 - this is also what
+    # findForecast()/findAvgUsage()/findActual() each did separately, the same
+    # "walk the list until the key matches" loop three times over).
+    return {tuple(row[i] for i in keyIndices):row[valueIndex] for row in rows}
 
 _locationCache=None
 
@@ -1461,10 +1467,13 @@ def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
     # applyCalibration must stay False for measured/historical values: the calibration
     # corrects forecast.solar's bias, and actuals carry no such bias
     global priceList,pvForecastRawWh
+    # forecastList rows are [seqNr, forecastDate, forecastHr, forecastWh] - built once,
+    # not re-scanned per interval (CODE-REVIEW.md D3).
+    forecastTable=_buildLookupTable(forecastList,(1,2),3)
     for intervalNr,interval in enumerate(priceList):
         intervalDate=interval[IDX_TIME_LOCAL][0:10] # date of local time in pricelist
         intervalHr=interval[IDX_TIME_LOCAL][11:13]  # hour of local time in pricelist
-        pvForecast=round(findForecast(intervalDate,intervalHr,forecastList)/intervalsPerHour()) # some rounding is o.k.
+        pvForecast=round(forecastTable.get((intervalDate,intervalHr),0)/intervalsPerHour()) # some rounding is o.k.
         # Keep the uncalibrated number, summed across panel groups the same way the calibrated
         # one is. Without it only the product of three multipliers is ever recorded, and
         # forecast.solar's own accuracy cannot be separated from the corrections applied to it
@@ -1487,55 +1496,33 @@ def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
         for record in priceList:
             print ("merged forecast ",record)
 
-def findAvgUsage(intervalHr,usageList):
-    # find usage estimate of a specific hour in the list
-    notFound=True
-    nrElements=len(usageList)
-    elementNr=0
-    usageWh=0
-    while notFound and elementNr<nrElements:
-        if usageList[elementNr][0]==intervalHr:
-            notFound=False
-            usageWh=usageList[elementNr][1]
-        else:
-            elementNr+=1
-    return usageWh
-
-def mergeUsageWithPriceList(usageList):
-    # merge usage estimate onto pricelist as separate fields
+def _mergeLoadIntoPriceList(rows,keyedByDate,label):
+    # Merges a load/usage source onto priceList's IDX_LOAD field. Two shapes of source
+    # reach here and both used to have their own merge function - mergeUsageWithPriceList
+    # (the hourly-average FORECAST profile, ["HH", Wh] rows, repeats every day) and
+    # mergeActualWithPricelist (ACTUAL usage from history, [seq, "YYYY-MM-DD", "HH", Wh]
+    # rows, one instant per row). Structurally the same merge over two differently-keyed
+    # sources - CODE-REVIEW.md D3.
     global priceList
-    for intervalNr,interval in enumerate(priceList):
-        intervalHr=interval[IDX_TIME_LOCAL][11:13]  # hour of local time in pricelist
-        hrAvgUsage=int(findAvgUsage(intervalHr,usageList)/intervalsPerHour()) # some rounding will occur, no poblem
-        priceList[intervalNr][IDX_LOAD]+=hrAvgUsage
-    if outputMode:
-        for record in priceList:
-            print ("merged usage",record)
-
-def findActual(intervalDate,intervalHr,usageList):
-    # find actual usage of the past in the list
-    notFound=True
-    nrElements=len(usageList)
-    elementNr=0
-    usageWh=0
-    while notFound and elementNr<nrElements:
-        if usageList[elementNr][1]==intervalDate and usageList[elementNr][2]==intervalHr:
-            notFound=False
-            usageWh=usageList[elementNr][3]
-        elementNr+=1
-    return usageWh
-
-def mergeActualWithPricelist(actualList):
-    # merge actual usage onto pricelist as separate fields
-    global priceList
+    table=_buildLookupTable(rows,(1,2),3) if keyedByDate else _buildLookupTable(rows,(0,),1)
+    perHour=intervalsPerHour()
     for intervalNr,interval in enumerate(priceList):
         intervalDate=interval[IDX_TIME_LOCAL][0:10] # date of local time in pricelist
         intervalHr=interval[IDX_TIME_LOCAL][11:13]  # hour of local time in pricelist
-        actual=int(findActual(intervalDate,intervalHr,actualList)/intervalsPerHour()) # some rounding is o.k.
-        priceList[intervalNr][IDX_LOAD]+=actual
+        key=(intervalDate,intervalHr) if keyedByDate else (intervalHr,)
+        value=int(table.get(key,0)/perHour) # some rounding is o.k.
+        priceList[intervalNr][IDX_LOAD]+=value
     if outputMode:
         for record in priceList:
-            print ("merged actual ",record)
+            print ("merged "+label,record)
+
+def mergeUsageWithPriceList(usageList):
+    # merge (forecast) usage estimate onto pricelist as separate fields
+    _mergeLoadIntoPriceList(usageList,keyedByDate=False,label="usage")
+
+def mergeActualWithPricelist(actualList):
+    # merge actual usage onto pricelist as separate fields
+    _mergeLoadIntoPriceList(actualList,keyedByDate=True,label="actual")
 
 def dropHistoryFromPricelist(runHour):
     # discard intervals of pricelist before starthour of the planning
@@ -1916,8 +1903,17 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
 
 
     # VARIABLES
-    chargeWh = pulp.LpVariable.dicts("charge", range(nrIntervals), lowBound=0, upBound=maxChargeSpeed) # this is indirect charge from PV not connected directly
-    dischargeWh = pulp.LpVariable.dicts("discharge", range(nrIntervals), lowBound=0, upBound=maxDischargeSpeed)
+    #
+    # upBound is the per-INTERVAL cap, not the raw hourly maxChargeSpeed/maxDischargeSpeed -
+    # CODE-REVIEW.md D6. This used to declare the bound as the full hourly value here and
+    # then separately constrain chargeWh[t]/dischargeWh[t] to maxChargeSpeed/intervalsPerHour()
+    # inside the per-interval loop below. Both were correct together (the tighter constraint
+    # always won), but the variable's OWN bound said something false in quarter-hour mode -
+    # "this can be 4850 Wh in a 15-minute interval" - and a future edit that dropped the loop
+    # constraint as apparently redundant with this one would have quadrupled the charge rate
+    # rather than caught nothing. One correct number, declared once.
+    chargeWh = pulp.LpVariable.dicts("charge", range(nrIntervals), lowBound=0, upBound=maxChargeSpeed/intervalsPerHour(hourAvgPlanning)) # this is indirect charge from PV not connected directly
+    dischargeWh = pulp.LpVariable.dicts("discharge", range(nrIntervals), lowBound=0, upBound=maxDischargeSpeed/intervalsPerHour(hourAvgPlanning))
     socFloorWh=int(float(minBatterySOCPct/100*ratedBatteryCapacity))
     sockWh = pulp.LpVariable.dicts("soc", range(nrIntervals), lowBound=socFloorWh, upBound=ratedBatteryCapacity)
     # The minimum-SOC rule is a rule for the plan, not a description of the battery. If the
@@ -1941,7 +1937,11 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     importWh = pulp.LpVariable.dicts("import", range(nrIntervals), lowBound=0, upBound=gridLimitPerInterval)
     exportWh = pulp.LpVariable.dicts("export", range(nrIntervals), lowBound=0,
                                      upBound=gridLimitPerInterval if gridLimitAppliesToExport else None)
-    costsEuro = pulp.LpVariable.dicts("costs", range(nrIntervals))
+    # A plain dict, not an LpVariable.dicts() - CODE-REVIEW.md D6. The previous LpVariable
+    # version was never added to `prob` (no constraint ever tied it to anything) and was
+    # immediately overwritten by the plain expression below before ever being solved for,
+    # so it existed only as N unused solver variables and a misleading declaration.
+    costsEuro = {}
 
     # OBJECTIVE, maximise income minus costs
     # note variables contain Wh values and all prices are kWh prices, so should be divided by factor 1000, but optimisation
@@ -1961,10 +1961,6 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
             ==
             priceList[t][forecastUsageIndex] + exportWh[t] + chargeWh[t] + priceList[t][forecastDirectIndex]
         )
-
-        # Charge / discharge limits
-        prob += chargeWh[t] <= maxChargeSpeed/intervalsPerHour(hourAvgPlanning)
-        prob += dischargeWh[t] <= maxDischargeSpeed/intervalsPerHour(hourAvgPlanning)
 
         # SOC evolution, make the connection between intervals
         if t == 0:
@@ -2021,39 +2017,48 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
 
 #### end of optimisation, beginning of output functions   #####
 
-def outputOptimisationResult(optimisationStatus,schedule,outputFileName,writeMode):
-    # output to a file
-    fileHandle = open(outputFileName, writeMode)
-    if optimisationStatus!="Optimal":
-        print ("ATTENTION: no optimal solution achieved, status is ",optimisationStatus," on date ",runDate,file=fileHandle)
-    if runDate==startDateObject:
-        print("date        time   pvD   pvI   use  nett chrgD  chrg dschg   soc   imp   exp  pr-buy pr-sell    cost",file=fileHandle)
-    totalCosts=0
+def _rowsToOutput(runDate,startDateObject,endDateObject,priceList,schedule):
+    """Which (nr, record) pairs from `schedule` this run's file output should include.
 
+    A BACKTEST-CHAINING convention, not a live-plan concern (CODE-REVIEW.md D8): a
+    multi-day backtest writes one growing file across several runDate iterations, and
+    every iteration after the first owns only the slice from 15:00 (when the next
+    day's prices become known) onward, so it does not re-print intervals the previous
+    iteration already wrote. plan-now.sh dodges all three branches by setting
+    BT_END=tomorrow, which always takes the first ("everything") branch below - see
+    its own comment for why a live plan would otherwise be cut short at 15:00.
+    """
     if runDate+timedelta(days=1)==endDateObject:
-        # output everything on the list
-        for nr,record in enumerate(schedule):
+        # last day of the run (or the live path, in practice): everything
+        return list(enumerate(schedule))
+    runDateString=datetime.strftime(runDate,'%Y-%m-%d')
+    if runDate==startDateObject:
+        # first day: from the start, up to (excl) 15:00 the next day
+        return [(nr,record) for nr,record in enumerate(schedule)
+                if priceList[nr][IDX_TIME_LOCAL][0:10]==runDateString
+                or str(priceList[nr][IDX_TIME_LOCAL][11:13])<"15"]
+    nextDateString=datetime.strftime(runDate+timedelta(days=1),'%Y-%m-%d')
+    # a middle day: from 15:00 runDate (incl) to 15:00 next day (excl)
+    return [(nr,record) for nr,record in enumerate(schedule)
+            if (priceList[nr][IDX_TIME_LOCAL][0:10]==runDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])>="15")
+            or (priceList[nr][IDX_TIME_LOCAL][0:10]==nextDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])<"15")]
+
+def outputOptimisationResult(optimisationStatus,schedule,outputFileName,writeMode):
+    # output to a file. `with`, not a bare open()/close() (CODE-REVIEW.md D8) - an
+    # exception mid-write used to leave the handle open and the file truncated.
+    rows=_rowsToOutput(runDate,startDateObject,endDateObject,priceList,schedule)
+    isLastDay=(runDate+timedelta(days=1)==endDateObject)
+    with open(outputFileName,writeMode) as fileHandle:
+        if optimisationStatus!="Optimal":
+            print ("ATTENTION: no optimal solution achieved, status is ",optimisationStatus," on date ",runDate,file=fileHandle)
+        if runDate==startDateObject:
+            print("date        time   pvD   pvI   use  nett chrgD  chrg dschg   soc   imp   exp  pr-buy pr-sell    cost",file=fileHandle)
+        totalCosts=0
+        for nr,record in rows:
             totalCosts+=record["costs"]
             printIntervalToFile(nr,record,fileHandle)
-        print("Total costs ",totalCosts)
-    else:
-        if runDate==startDateObject:
-            # output until 15:00 next day (excl)
-            runDateString=datetime.strftime(runDate,'%Y-%m-%d')
-            for nr,record in enumerate(schedule):
-                if priceList[nr][IDX_TIME_LOCAL][0:10]==runDateString or str(priceList[nr][IDX_TIME_LOCAL][11:13])<"15":
-                    totalCosts+=record["costs"]
-                    printIntervalToFile(nr,record,fileHandle)
-        else:
-            # output from 15:00 runDate (incl) till 15:00 next day (excl)
-            runDateString=datetime.strftime(runDate,'%Y-%m-%d')
-            nextDateString=datetime.strftime(runDate+timedelta(days=1),'%Y-%m-%d')
-            for nr,record in enumerate(schedule):
-                if ((priceList[nr][IDX_TIME_LOCAL][0:10]==runDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])>="15") or (priceList[nr][IDX_TIME_LOCAL][0:10]==nextDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])<"15")):
-                    totalCosts+=record["costs"]
-                    printIntervalToFile(nr,record,fileHandle)
-
-    fileHandle.close()
+        if isLastDay:
+            print("Total costs ",totalCosts)
 
 def printIntervalToFile(nr,record,fileHandle):
     # output one single line to a file

@@ -18,6 +18,7 @@ Actions are named from the battery's point of view. "Sell" means discharging to 
 "cover load" means discharging into the house, which earns the retail price rather than the
 export price and is usually the more valuable of the two.
 """
+import argparse
 import sys
 from datetime import datetime, timedelta
 
@@ -198,41 +199,50 @@ def actuals(rows):
     print()
 
 
-if __name__ == "__main__":
-    minHours = 0.0
-    rawArgs = sys.argv[1:]
-    if "--min-hours" in rawArgs:
-        i = rawArgs.index("--min-hours")
-        minHours = float(rawArgs[i + 1])
-        rawArgs = rawArgs[:i] + rawArgs[i + 2:]
-    args = [a for a in rawArgs if not a.startswith("--")]
-    flags = {a for a in rawArgs if a.startswith("--")}
-    if not args:
+def _parseArgs(argv):
+    # CODE-REVIEW.md D9: this used to be hand-rolled (rawArgs.index("--min-hours")),
+    # which raised a bare IndexError for "--min-hours" with no value and a bare
+    # ValueError for a non-numeric one. argparse turns both into a clean one-line
+    # error on stderr and exit 2, same as any other bad argument.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("paths", nargs="*", metavar="plan.txt")
+    parser.add_argument("--all", action="store_true", dest="showIdle")
+    parser.add_argument("--actuals", action="store_true")
+    parser.add_argument("--min-hours", type=float, default=0.0, dest="minHours")
+    return parser.parse_args(argv)
+
+
+def main(argv):
+    ns = _parseArgs(argv)
+    if not ns.paths:
         print(__doc__)
-        raise SystemExit(2)
+        return 2
     tooShort = False
-    for path in args:
+    for path in ns.paths:
         rows = readPlan(path)
         if not rows:
             print("no plan rows in %s" % path)
-            if minHours:
+            if ns.minHours:
                 # An empty plan is the SHORTEST possible horizon (0h), not a case with
                 # nothing to check. Skipping the --min-hours guard here is exactly the
                 # gap that let a total input failure (both price sources empty,
                 # LPoptimization() solving zero intervals as "Optimal") look identical
                 # to a healthy run: plan-now.sh calls this with --min-hours precisely to
                 # catch that, and a bare `continue` let it through with exit 0.
-                print("  ERROR: 0 plan rows, need >= %.1fh (empty plan - see the planner's own output above)" % minHours)
+                print("  ERROR: 0 plan rows, need >= %.1fh (empty plan - see the planner's own output above)" % ns.minHours)
                 tooShort = True
             continue
-        render(rows, path, showIdle="--all" in flags)
-        if "--actuals" in flags:
+        render(rows, path, showIdle=ns.showIdle)
+        if ns.actuals:
             actuals(rows)
-        if minHours:
+        if ns.minHours:
             minutes = intervalMinutes(rows)
             span = (rows[-1]["ts"] + timedelta(minutes=minutes) - rows[0]["ts"]).total_seconds() / 3600.0
-            if span + 1e-9 < minHours:
-                print("  ERROR: horizon is only %.2fh, need >= %.1fh (stale/short price data?)" % (span, minHours))
+            if span + 1e-9 < ns.minHours:
+                print("  ERROR: horizon is only %.2fh, need >= %.1fh (stale/short price data?)" % (span, ns.minHours))
                 tooShort = True
-    if tooShort:
-        raise SystemExit(1)
+    return 1 if tooShort else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -169,3 +169,22 @@ def test_live_path_unaffected_by_default_arguments(planner):
     status, schedule = planner.LPoptimization()   # every argument defaults to None
     assert status == "Optimal"
     assert len(schedule) == 4
+
+
+def test_quarter_hour_charge_capped_at_a_quarter_of_the_hourly_rate(planner):
+    """CODE-REVIEW.md D6: chargeWh's own upBound is now maxChargeSpeed/intervalsPerHour()
+    (was the full hourly maxChargeSpeed, with a SEPARATE per-interval constraint doing the
+    real capping). This is the regression that fix guards against: with only the variable's
+    own bound left to enforce the cap, charging must still be capped at a quarter of the
+    hourly rate in quarter-hour mode, not the full hourly rate.
+
+    Two intervals, cheap then dear (same shape as the arbitrage test above) - a single
+    interval gives the optimiser no reason to charge at all, since with terminalReserveWh=0
+    there is nothing left to sell it into."""
+    args = dict(COMMON, hourAvgPlanning=False)   # quarter-hour mode
+    priceList = [_row(0, 0.01, 0.01, load=0), _row(1, 0.40, 0.40, load=0)]
+    status, schedule = planner.LPoptimization(
+        priceList=priceList, initialCharge=2790, **args)
+    assert status == "Optimal"
+    assert schedule[0]["charge"] <= 4850 / 4 + 1   # +1: integer rounding in the schedule dict
+    assert schedule[0]["charge"] > 4850 / 8        # sanity: actually charged near the cap, not near 0

@@ -604,12 +604,21 @@ new modules (`hardware`, `solar`, `http_config`) confirmed importable from insid
 
 ### Stage 3 — structure
 
-- [ ] **D3** One keyed lookup and one merge replace three of each
-- [ ] **D6** Fix the contradictory LP bounds; delete the dead `costsEuro` declaration
-- [ ] **D8** `outputOptimisationResult()` uses `with`, and row selection becomes its own
+- [x] **D3** One keyed lookup and one merge replace three of each
+- [x] **D6** Fix the contradictory LP bounds; delete the dead `costsEuro` declaration
+- [x] **D8** `outputOptimisationResult()` uses `with`, and row selection becomes its own
       function
-- [ ] **D9** `argparse` in `advise.py` and `report_day.py`
-- [ ] **D7** Split `getUserInput()`: reading config, and fetching live SoC, are two jobs
+- [x] **D9** `argparse` in `advise.py` and `report_day.py`
+- [x] **D7** Split `getUserInput()`: reading config, and fetching live SoC, are two jobs
+
+Stage 3 done. D6's fix was verified as a real regression risk, not a theoretical one: reverting
+the corrected `upBound` and re-running its new test reproduced the quadrupled charge rate the
+review warned about, confirmed the test catches it, then restored the fix. D8's row-selection
+extraction was checked against a real 3-day multi-day backtest (old vs new `Marstek-planning.py`,
+byte-for-byte output) that genuinely exercises all three branches of `_rowsToOutput()` — the
+golden-file tests alone only cover the "everything" branch. D9 closed both concrete footguns the
+review named (`--min-hours` with no value, a non-numeric value) — reproduced each crashing before
+the fix and printing a clean one-line error after.
 
 ### Stage 4 — hardening the paths that are currently dead
 
