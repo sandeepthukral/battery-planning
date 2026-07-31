@@ -25,10 +25,15 @@ The raw CSV is never modified. Usage:
 import csv
 import json
 import math
+import os
 import sys
 import collections
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import solar
 
 RAW = sys.argv[1] if len(sys.argv) > 1 else "backtest_input_hourly.csv"
 CLEAN = sys.argv[2] if len(sys.argv) > 2 else "backtest_input_hourly_clean.csv"
@@ -42,27 +47,14 @@ UTC = ZoneInfo("UTC")
 d2r, r2d = math.radians, math.degrees
 
 
-def solar_elevation(dt_local):
-    """Solar elevation (deg) at the midpoint of the hour starting at dt_local."""
-    dt = (dt_local + timedelta(minutes=30)).astimezone(UTC)
-    n = dt.timestamp() / 86400.0 + 2440587.5 - 2451545.0
-    mean_long = (280.460 + 0.9856474 * n) % 360
-    mean_anom = d2r((357.528 + 0.9856003 * n) % 360)
-    eclip = d2r(mean_long + 1.915 * math.sin(mean_anom) + 0.020 * math.sin(2 * mean_anom))
-    obl = d2r(23.439 - 0.0000004 * n)
-    dec = math.asin(math.sin(obl) * math.sin(eclip))
-    ra = math.atan2(math.cos(obl) * math.sin(eclip), math.cos(eclip))
-    gmst = (18.697374558 + 24.06570982441908 * n) % 24
-    lst = (gmst + LON / 15.0) % 24
-    ha = d2r(((lst * 15.0 - r2d(ra) + 180) % 360) - 180)
-    lat = d2r(LAT)
-    return r2d(math.asin(math.sin(lat) * math.sin(dec)
-                         + math.cos(lat) * math.cos(dec) * math.cos(ha)))
-
-
 def clearsky_weight(dt_local):
-    """Relative clear-sky yield weight for an hour; 0 when the sun is down."""
-    elev = solar_elevation(dt_local)
+    """Relative clear-sky yield weight for an hour; 0 when the sun is down.
+
+    Elevation at the MIDPOINT of the hour starting at dt_local, hence the +30min -
+    the same convention Marstek-planning.py's own solarElevation() uses (see
+    solar.py, CODE-REVIEW.md D5, which now holds the one copy of the formula itself).
+    """
+    elev = solar.elevation(LAT, LON, dt_local + timedelta(minutes=30))
     if elev <= 0:
         return 0.0
     z = d2r(90 - elev)

@@ -27,14 +27,19 @@ revision cannot change a past verdict. That also settles saldering for free: pri
 written with the regime that applied to that interval, so a report spanning 1 January 2027
 values exports on both sides of the boundary correctly without repeating the rule here.
 """
+import argparse
 import os
 import sys
 from datetime import datetime, date, time, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import influx_source as ix
+import hardware
 
-CAPACITY_WH = float(os.environ.get("BT_CAP", "27900"))
+# BT_CAP still overrides for a backtest/what-if run, same as Marstek-planning.py's own
+# getUserInput(); the DEFAULT comes from hardware.py (CODE-REVIEW.md D4) instead of a
+# second hardcoded "27900" that could silently drift from the planner's own constant.
+CAPACITY_WH = float(os.environ.get("BT_CAP", str(hardware.CAPACITY_WH)))
 PLAN_MEASUREMENT = "plan"
 SCORE_MEASUREMENT = "plan_score"
 
@@ -381,20 +386,27 @@ def scoreLines(rows):
     return lines
 
 
+def _parseDate(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be YYYY-MM-DD, got %r" % value)
+
+
+def _parseArgs(argv):
+    # CODE-REVIEW.md D9: replaces hand-rolled flag/positional splitting.
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("day", nargs="?", type=_parseDate, metavar="YYYY-MM-DD",
+                         help="local date to report on (default: yesterday)")
+    parser.add_argument("--write", action="store_true",
+                         help="also store the comparison as measurement plan_score")
+    return parser.parse_args(argv)
+
+
 def main(argv):
-    args = [a for a in argv if not a.startswith("--")]
-    flags = {a for a in argv if a.startswith("--")}
-    if "--help" in flags or "-h" in argv:
-        print(__doc__)
-        return 0
-    if args:
-        try:
-            day = datetime.strptime(args[0], "%Y-%m-%d").date()
-        except ValueError:
-            print("usage: report_day.py [YYYY-MM-DD] [--write]")
-            return 2
-    else:
-        day = (datetime.now(ix.LOCAL_TZ) - timedelta(days=1)).date()
+    ns = _parseArgs(argv)
+    day = ns.day or (datetime.now(ix.LOCAL_TZ) - timedelta(days=1)).date()
 
     if not ix.configured():
         print("InfluxDB is not configured; run 'python3 influx_source.py' to see what is missing.")
@@ -411,7 +423,7 @@ def main(argv):
     sectionOutcomes(d["rows"])
     sectionForecast(d["rows"])
 
-    if "--write" in flags and d["rows"]:
+    if ns.write and d["rows"]:
         try:
             written = ix.writePoints(scoreLines(d["rows"]))
             print("stored %d %s intervals in bucket %s"

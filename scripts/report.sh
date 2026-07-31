@@ -20,7 +20,10 @@ set -eu
 PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 export PATH
 
-REPO_DIR="/volume1/docker/battery-planning"
+# Overridable so this script can be exercised by a test without the NAS path existing
+# (see tests/test_report_sh.py); the DSM task never sets REPO_DIR, so it always gets
+# the real path.
+REPO_DIR="${REPO_DIR:-/volume1/docker/battery-planning}"
 LOCK_DIR="$REPO_DIR/data/.report.lock"
 STALE_MINUTES=30
 
@@ -67,17 +70,29 @@ mkdir -p data/reports
 OUT="data/reports/report_$(echo "$DAY" | tr -d -).txt"
 
 rc=0
-docker compose run --rm --no-deps planner \
+# ${DOCKER:-docker}, not a bare `docker`: lets tests/test_report_sh.py substitute a
+# stub without fighting the PATH rewrite two lines above, which would otherwise put
+# the real /usr/local/bin/docker ahead of anything a test prepends to PATH.
+"${DOCKER:-docker}" compose run --rm --no-deps planner \
     python3 /app/report_day.py "$DAY" --write > "$OUT.$$" 2>&1 || rc=$?
 
 # Move into place only once the run is over, so a half-written report is never mistaken for
 # a finished one - and so re-running a day leaves the previous file intact until the new one
 # is complete.
-mv "$OUT.$$" "$OUT"
-
-cat "$OUT"
-
-# Exit 1 means "no plans stored for that day" - a day the planner did not run, which is worth
-# seeing in the task log rather than swallowing.
-echo "$(stamp) report: done (exit $rc) -> $OUT"
+#
+# Only on rc 0 or 1, and deliberately so. rc 1 means "no plans stored for that day" -
+# report_day.py still finished and wrote something worth reading. Any other rc is a
+# real failure (the docker run itself, an InfluxDB error, a traceback), and OUT.$$ at
+# that point holds that failure's output, not a report - moving it into place would
+# silently replace yesterday's good report with today's error message. Left as OUT.$$
+# instead, so the next successful run overwrites it in the ordinary course of things.
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
+    mv "$OUT.$$" "$OUT"
+    cat "$OUT"
+    echo "$(stamp) report: done (exit $rc) -> $OUT"
+else
+    echo "$(stamp) report: FAILED (exit $rc) - leaving the previous $OUT untouched"
+    echo "$(stamp) report: failure output kept at $OUT.$$"
+    cat "$OUT.$$"
+fi
 exit $rc

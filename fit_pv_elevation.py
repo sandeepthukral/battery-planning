@@ -36,14 +36,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import influx_source as ix
 import report_day as rd
+import solar
 
 
 def planner():
     """The planner module, loaded by path because its filename has a hyphen in it.
 
-    Imported rather than copied so the curve and the solar-position code compared against
-    are always the ones actually in use. A copy here would drift, and would drift silently,
-    since a wrong curve renders as a plausible number rather than an error.
+    Imported rather than copied so the curve compared against is always the one
+    actually in use. A copy here would drift, and would drift silently, since a wrong
+    curve renders as a plausible number rather than an error.
     """
     spec = importlib.util.spec_from_file_location(
         "marstek_planning", os.path.join(HERE, "Marstek-planning.py"))
@@ -55,51 +56,27 @@ def planner():
 BIN_DEG = 5
 
 
-def solarElevation(lat, lon, when):
-    """Sun elevation in degrees, NOAA approximation, at an exact instant.
-
-    The planner has its own solarElevation(), and importing it would have been preferable,
-    but it takes a date string and an HOUR string and adds its own thirty-minute midpoint --
-    it cannot resolve anything finer than an hour. Hourly resolution is the problem this
-    script exists to get past: near sunrise the sun climbs about three degrees in a quarter
-    of an hour, so an hourly label puts a whole bin of error into exactly the bands where
-    the curve is steepest. Agreement with the planner's version at whole hours is asserted
-    by checkAgreement() below, so this is a refinement rather than a second opinion.
-    """
-    jd = when.timestamp() / 86400.0 + 2440587.5
-    n = jd - 2451545.0
-    meanLong = math.radians((280.460 + 0.9856474 * n) % 360)
-    meanAnom = math.radians((357.528 + 0.9856003 * n) % 360)
-    eclipLong = (meanLong + math.radians(1.915) * math.sin(meanAnom)
-                 + math.radians(0.020) * math.sin(2 * meanAnom))
-    obliquity = math.radians(23.439 - 0.0000004 * n)
-    declination = math.asin(math.sin(obliquity) * math.sin(eclipLong))
-    rightAsc = math.atan2(math.cos(obliquity) * math.sin(eclipLong), math.cos(eclipLong))
-    gmst = (18.697374558 + 24.06570982441908 * n) % 24
-    hourAngle = math.radians((gmst * 15.0 + lon) % 360) - rightAsc
-    latRad = math.radians(lat)
-    return math.degrees(math.asin(
-        math.sin(latRad) * math.sin(declination)
-        + math.cos(latRad) * math.cos(declination) * math.cos(hourAngle)))
-
-
 def checkAgreement(mod, when, tolerance=1.0):
-    """The planner's hourly elevation against this one, at the hour midpoint it assumes.
+    """The planner's hourly elevation against solar.elevation() at the same instant,
+    via its own date/hour-string wrapper (see Marstek-planning.py's solarElevation()).
 
-    Guards the copy above against drifting from the code the planner actually plans with.
-    A silent disagreement here would move every band boundary and the fit would still look
-    entirely plausible.
+    CODE-REVIEW.md D5 removed this file's own copy of the elevation formula - both
+    call sites now share solar.py's implementation, so a FORMULA disagreement can no
+    longer happen. What can still drift is the planner's WRAPPER around it: date/hour
+    string parsing, the 30-minute hour-midpoint, and the HTTP-resolved site location.
+    This still catches that - a silent break there would move every band boundary and
+    the fit would still look entirely plausible.
     """
     lat, lon = float(mod.siteLatitude), float(mod.siteLongitude)
     theirs = mod.solarElevation(when.strftime("%Y-%m-%d"), when.strftime("%H"))
-    mine = solarElevation(lat, lon, when.replace(minute=30, second=0, microsecond=0))
+    mine = solar.elevation(lat, lon, when.replace(minute=30, second=0, microsecond=0))
     return theirs, mine, abs(theirs - mine) <= tolerance
 
 
 def elevationOf(lat, lon, when, minutes):
     """Elevation at the middle of the interval, not at its start -- a quarter-hour labelled
     by its start sits most of a bin away from where its energy was made."""
-    return solarElevation(lat, lon, when + timedelta(minutes=minutes / 2.0))
+    return solar.elevation(lat, lon, when + timedelta(minutes=minutes / 2.0))
 
 
 def collect(days):
@@ -218,7 +195,7 @@ def main(argv):
         se = stderr(perInterval)
         # The curve is evaluated directly on elevation rather than through
         # pvElevationCalibration(), which takes a date and hour and derives elevation itself.
-        curveSays = _interp(d["mod"].pvElevationLossCurve, lo + BIN_DEG / 2.0)
+        curveSays = solar.interpolate(d["mod"].pvElevationLossCurve, lo + BIN_DEG / 2.0)
         print("  %3d-%3d %8d %9.1f  %9.1f  %6.3f  %s   %5.2f"
               % (lo, lo + BIN_DEG, len(pairs), rawSum / 1000.0, actSum / 1000.0, ratio,
                  ("%5.3f" % se) if se is not None else "    -", curveSays))
@@ -243,17 +220,6 @@ def main(argv):
     print("in summer they occur only at dawn and dusk, with the sun in the north-east and")
     print("north-west rather than the south, over different obstructions.")
     return 0
-
-
-def _interp(curve, x):
-    if x <= curve[0][0]:
-        return curve[0][1]
-    for i in range(1, len(curve)):
-        x0, y0 = curve[i - 1]
-        x1, y1 = curve[i]
-        if x <= x1:
-            return y0 + (y1 - y0) * (x - x0) / (x1 - x0) if x1 > x0 else y1
-    return curve[-1][1]
 
 
 if __name__ == "__main__":

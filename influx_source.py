@@ -53,9 +53,13 @@ Self-test:
 import csv as _csv
 import io
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 import requests
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import http_config
 
 try:
     from zoneinfo import ZoneInfo
@@ -147,6 +151,18 @@ def config():
     return _config
 
 
+def resetConfig():
+    """Forget the cached config so the next config() call re-reads the environment.
+
+    Only needed by tests: a real process reads its environment once at startup, so
+    caching is the right call there. A test process does not get that fresh start -
+    without this, a test that sets INFLUX_URL after any earlier test has already called
+    config() would silently see the earlier test's answer instead of its own.
+    """
+    global _config
+    _config = None
+
+
 def configured():
     c = config()
     return bool(c["url"] and c["token"])
@@ -175,7 +191,7 @@ def _query(flux):
         headers={"Authorization": "Token " + c["token"],
                  "Content-Type": "application/vnd.flux",
                  "Accept": "application/csv"},
-        timeout=30)
+        timeout=http_config.HTTP_TIMEOUT)
     resp.raise_for_status()
     return _parseAnnotatedCsv(resp.text)
 
@@ -270,7 +286,7 @@ def writePoints(lines, bucket=None, batch=1000):
             data="\n".join(chunk).encode("utf-8"),
             headers={"Authorization": "Token " + c["token"],
                      "Content-Type": "text/plain; charset=utf-8"},
-            timeout=30)
+            timeout=http_config.HTTP_TIMEOUT)
         if resp.status_code >= 400:
             # Influx puts the useful part in the body - which field collided, which line
             # failed to parse - and raise_for_status() throws all of it away.
@@ -425,16 +441,28 @@ def hourlyEnergyWh(field, start, stop, min_coverage=0.5, clamp_negative=False):
 
 
 def hourlyAvgProfileWh(field=FIELD_LOAD, days=7, weightIncrease=0.0):
-    """Average energy per hour-of-day over the last `days`, as [["HH", Wh], ...].
+    """Average energy per hour-of-day over the last `days` COMPLETE local days, as
+    [["HH", Wh], ...].
 
     Matches the shape Marstek-planning.py's calcHourlyAvgUsage() returns. More
     recent days can be weighted up via weightIncrease (0 = flat average), mirroring
     the original Domoticz behaviour.
+
+    stop is snapped to local midnight, not left at "now". Snapping only the hour (the
+    previous behaviour) made the window run from partway through today back to the
+    same wall-clock moment `days` ago - which spans days+1 CALENDAR dates whenever
+    "now" isn't exactly midnight, and gives hours after "now" one fewer sample than
+    hours before it. `days=7` returning 8 distinct dates was that bug, not an
+    off-by-one in a comparison. Ending at midnight instead means every hour-of-day
+    bucket is built from the same `days` complete days - today's partial data is
+    excluded on purpose, since a half-covered "today" would reintroduce the same
+    unevenness this fixes.
     """
     now = datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.now(timezone.utc)
-    start = (now - timedelta(days=days)).replace(minute=0, second=0, microsecond=0)
+    stop = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = stop - timedelta(days=days)
     # load and PV cannot be negative; the sign-carrying fields must not be clamped
-    hours = hourlyEnergyWh(field, start, now,
+    hours = hourlyEnergyWh(field, start, stop,
                            clamp_negative=field in (FIELD_LOAD, FIELD_PV))
 
     totals = [0.0] * 24

@@ -1,0 +1,7 @@
+# Test-only dependencies. Not installed in the container image (see Dockerfile /
+# requirements.txt) - nothing under tests/ ships or runs in production.
+#
+#   .venv/bin/pip install -r requirements-dev.txt
+#   .venv/bin/python -m pytest
+
+pytest==8.3.4

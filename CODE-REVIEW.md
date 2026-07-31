@@ -556,54 +556,89 @@ first.
 
 ### Stage 0 — make change safe (do this first)
 
-- [ ] **A3** Add `influx_source.resetConfig()` so config is testable
-- [ ] **A2 step 1** Give `LPoptimization()` explicit parameters defaulting to the globals
-- [ ] **A2 step 2** Same for `calcTerminalReserveWh()` and `hourlyShapeFromPriceList()`
+- [x] **A3** Add `influx_source.resetConfig()` so config is testable
+- [x] **A2 step 1** Give `LPoptimization()` explicit parameters defaulting to the globals
+- [x] **A2 step 2** Same for `calcTerminalReserveWh()` and `hourlyShapeFromPriceList()`
 - [ ] **A1** Stand up `tests/` + `pytest` + the fixture set (see the test plan below)
 - [ ] **A1** Golden-file characterisation test: one fixed day in, exact plan out
-- [ ] **E8** CI: build the image, run the CBC smoke test, run `pytest`
+- [x] **E8** CI: build the image, run the CBC smoke test, run `pytest`
 
 ### Stage 1 — correctness and silent failure
 
-- [ ] **C1a** `advise.py`: an empty plan fails `--min-hours` instead of passing
-- [ ] **C1b** `LPoptimization()` refuses `nrIntervals == 0` with a named exit code
-- [ ] **C2** `dropHistoryFromPricelist()` clamps and warns instead of `IndexError`
-- [ ] **C3** `buildInitialPlanningList()` uses `pricePublishHour`, not a second literal 15
-- [ ] **C4** `hourlyAvgProfileWh()` snaps to local midnight — closes the `TODO.md` item and
+- [x] **C1a** `advise.py`: an empty plan fails `--min-hours` instead of passing
+- [x] **C1b** `LPoptimization()` refuses `nrIntervals == 0` with a named exit code
+- [x] **C2** `dropHistoryFromPricelist()` clamps and warns instead of `IndexError`
+- [x] **C3** `buildInitialPlanningList()` uses `pricePublishHour`, not a second literal 15
+      (no isolated test - see the note below the checklist)
+- [x] **C4** `hourlyAvgProfileWh()` snaps to local midnight — closes the `TODO.md` item and
       the uneven-sampling bias with it
-- [ ] **C5** `getSOC()` raises on a missing hour instead of returning the last interval
-- [ ] **C7** Live path asserts `BT_START` agrees with the planner's own `today`
-- [ ] **E1** `report.sh` moves the report into place only on success
-- [ ] **E3** `plan-now.sh` checks the plan file exists before `mv`
+- [x] **C5** `getSOC()` raises on a missing hour instead of returning the last interval
+- [x] **C7** Live path asserts `BT_START` agrees with the planner's own `today`
+- [x] **E1** `report.sh` moves the report into place only on success
+- [x] **E3** `plan-now.sh` checks the plan file exists before `mv`
+
+Stage 1 done. One honest gap: **C3 has no automated test.** `buildInitialPlanningList()`
+reaches ENTSOE/EnergyZero and reads `today`/`runDate` module globals with no A2-style
+parametrization, so testing the one-line fix in isolation would mean mocking well past what
+this fix touches. The line was read back in context to confirm it matches `pricePublishHour`
+correctly; that is verification, not a test, and it is exactly the D7/D8 problem (that
+function does too much) making itself felt. Worth returning to once Stage 3 decomposes it.
 
 ### Stage 2 — one source of truth
 
-- [ ] **D4** Extract hardware constants; `advise.py` and `report_day.py` stop holding their
+- [x] **D4** Extract hardware constants; `advise.py` and `report_day.py` stop holding their
       own copy of 27,900. **Do this before the capacity upgrade, not during it.**
-- [ ] **D2** One `intervalsPerHour()` helper replaces eight hardcoded `/4`
-- [ ] **D1** Module-level `IDX_*` constants for `priceList` positions
-- [ ] **D5** One `solar.py`; `clean_backtest_csv.py` and `fit_pv_elevation.py` import it
-- [ ] **E7** Share `HTTP_TIMEOUT`
+      (`hardware.py`; the planned capacity upgrade can now edit one file instead of three.)
+- [x] **D2** One `intervalsPerHour()` helper replaces eight hardcoded `/4`
+- [x] **D1** Module-level `IDX_*` constants for `priceList` positions
+- [x] **D5** One `solar.py`; `clean_backtest_csv.py` and `fit_pv_elevation.py` import it
+      (bonus: `fit_pv_elevation.py`'s `checkAgreement()` now compares exactly, not within
+      1° tolerance, since both sides call the same function)
+- [x] **E7** Share `HTTP_TIMEOUT` (`http_config.py`)
+
+Stage 2 done. Every fix verified behaviour-preserving before committing: the golden-file
+tests stayed byte-identical throughout, and `clean_backtest_csv.py`'s D5 refactor was
+additionally diffed byte-for-byte against its pre-refactor output over the real (gitignored)
+backtest CSV — output and sidecar both identical. The container was rebuilt locally and the
+new modules (`hardware`, `solar`, `http_config`) confirmed importable from inside it.
 
 ### Stage 3 — structure
 
-- [ ] **D3** One keyed lookup and one merge replace three of each
-- [ ] **D6** Fix the contradictory LP bounds; delete the dead `costsEuro` declaration
-- [ ] **D8** `outputOptimisationResult()` uses `with`, and row selection becomes its own
+- [x] **D3** One keyed lookup and one merge replace three of each
+- [x] **D6** Fix the contradictory LP bounds; delete the dead `costsEuro` declaration
+- [x] **D8** `outputOptimisationResult()` uses `with`, and row selection becomes its own
       function
-- [ ] **D9** `argparse` in `advise.py` and `report_day.py`
-- [ ] **D7** Split `getUserInput()`: reading config, and fetching live SoC, are two jobs
+- [x] **D9** `argparse` in `advise.py` and `report_day.py`
+- [x] **D7** Split `getUserInput()`: reading config, and fetching live SoC, are two jobs
+
+Stage 3 done. D6's fix was verified as a real regression risk, not a theoretical one: reverting
+the corrected `upBound` and re-running its new test reproduced the quadrupled charge rate the
+review warned about, confirmed the test catches it, then restored the fix. D8's row-selection
+extraction was checked against a real 3-day multi-day backtest (old vs new `Marstek-planning.py`,
+byte-for-byte output) that genuinely exercises all three branches of `_rowsToOutput()` — the
+golden-file tests alone only cover the "everything" branch. D9 closed both concrete footguns the
+review named (`--min-hours` with no value, a non-numeric value) — reproduced each crashing before
+the fix and printing a clean one-line error after.
 
 ### Stage 4 — hardening the paths that are currently dead
 
 Everything here is inert while `useDomoticz=False`. Grouped so it can be done in one sitting
 if Domoticz is ever revived, and skipped entirely if it is not.
 
-- [ ] **B2** `except Exception:` replaces sixteen bare `except:`
-- [ ] **B3** Error handlers stop referencing a possibly-unbound `response`
-- [ ] **B4** Timeouts and URL escaping on the Domoticz calls
-- [ ] **B5** `setBatteryAction()` stops sending mail as a side effect
-- [ ] **C6** `calcHourlyAvgUsage()` binds `hourlyAvgs` before returning it
+- [x] **B2** `except Exception:` replaces sixteen bare `except:` (12 found in the file, not
+      16 - fixed all of them; the original count was an overestimate)
+- [x] **B3** Error handlers stop referencing a possibly-unbound `response`
+- [x] **B4** Timeouts and URL escaping on the Domoticz calls
+- [x] **B5** `setBatteryAction()` stops sending mail as a side effect
+- [x] **C6** `calcHourlyAvgUsage()` binds `hourlyAvgs` before returning it
+
+Stage 4 done. Every fix in this stage was verified as a REAL bug, not a theoretical one: each
+of B3, B5 and C6 was reverted in turn, its new test watched to fail with exactly the failure
+mode the review predicted (`UnboundLocalError` for B3/C6, an unconditional notification email
+for B5), then restored. `tests/test_domoticz_dead_path.py` covers all five items - these paths
+are dead only because `useDomoticz=False`; the tests exercise them directly by setting it
+`True` for the duration of one test, monkeypatching `requests` rather than reaching a real
+Domoticz host.
 
 ### Stage 5 — nice to have
 

@@ -126,7 +126,22 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 plan=plans/plan_${today}_${hour}.txt
-mv entsoe-output${today}.txt $plan
+planOutput=entsoe-output${today}.txt
+if [ ! -f "$planOutput" ]; then
+  # The planner exited 0 above but did not write the file this expects under
+  # today's date. The known cause is the midnight race between this script's own
+  # `date` and Marstek-planning.py's separate clock (see its "Wall clock" block and
+  # the BT_INITCHARGE=influx guard, CODE-REVIEW.md C7): the planner refuses in that
+  # case, which should have been caught by `rc -ne 0` above, but a mismatch that
+  # instead sent it down the HISTORICAL branch writes its output under a DIFFERENT
+  # date's filename rather than failing at all. Naming this here turns a bare `mv:
+  # no such file` followed by a confusing advise.py traceback into one sentence
+  # that says what actually happened.
+  printf '%s\n' "ERROR: expected planner output $planOutput not found. Last lines of $log:" >&2
+  tail -20 "$log" >&2
+  exit 1
+fi
+mv "$planOutput" "$plan"
 printf '%s\n' "plan written to $plan"
 
 # We run every 3 hours; a plan shorter than that plus slack leaves gaps where nothing has
