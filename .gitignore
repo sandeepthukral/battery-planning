@@ -1,6 +1,6 @@
 .venv/
 .env
-price_cache/
+/price_cache/
 results/
 entsoe-output*.txt
 entsoe*.xml
