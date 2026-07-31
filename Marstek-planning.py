@@ -1671,11 +1671,17 @@ def buildInitialPlanningList():
                 print ("without history ",record)
 ##### end of all function to collect input data   #####
 
-def hourlyShapeFromPriceList():
+def hourlyShapeFromPriceList(priceList=None, hourAvgPlanning=None):
     # average load, PV and buy price per hour-of-day across the planning window.
     # Derived from priceList itself so it works identically for a live plan (forecasts) and
     # a backtest (measured actuals), with no extra data source. counts says how many
     # intervals fed each hour, so callers can tell a measured hour from an uncovered one.
+    #
+    # Parameters default to the module globals (CODE-REVIEW.md A2 step 2), same pattern
+    # as LPoptimization()'s _fallback: the live path, which calls this with no arguments,
+    # is unaffected.
+    priceList = _fallback("priceList", priceList)
+    hourAvgPlanning = _fallback("hourAvgPlanning", hourAvgPlanning)
     loadSum=[0.0]*24
     pvSum=[0.0]*24
     priceSum=[0.0]*24
@@ -1694,7 +1700,8 @@ def hourlyShapeFromPriceList():
     priceAvg=[priceSum[h]/counts[h] if counts[h] else None for h in range(24)]
     return loadAvg,pvAvg,priceAvg,counts
 
-def hoursUntilRefill(startHour,month,loadAvg,pvAvg,priceAvg,counts):
+def hoursUntilRefill(startHour,month,loadAvg,pvAvg,priceAvg,counts,
+                      cheapQuantile=None,typicalCheapHourByMonth=None,reserveMaxHours=None):
     """Hours from startHour until the battery can next be refilled. Returns (hours,reason).
 
     Two things end the reserve period, whichever comes first:
@@ -1705,7 +1712,15 @@ def hoursUntilRefill(startHour,month,loadAvg,pvAvg,priceAvg,counts):
     hour, because the cheapest hour of the day is midday for two thirds of the year here
     and pre-dawn only in Oct-Feb. Where the window covers an hour its measured price
     decides; where it does not, the month's typical cheap hour stands in.
+
+    cheapQuantile/typicalCheapHourByMonth/reserveMaxHours default to the module globals
+    (A2 step 2); loadAvg/pvAvg/priceAvg/counts stay required, as before - they are
+    hourlyShapeFromPriceList()'s output, not configuration, so there is no sensible
+    global to fall back to.
     """
+    cheapQuantile=_fallback("cheapQuantile",cheapQuantile)
+    typicalCheapHourByMonth=_fallback("typicalCheapHourByMonth",typicalCheapHourByMonth)
+    reserveMaxHours=_fallback("reserveMaxHours",reserveMaxHours)
     known=[p for p in priceAvg if p is not None]
     threshold=None
     if known:
@@ -1724,19 +1739,38 @@ def hoursUntilRefill(startHour,month,loadAvg,pvAvg,priceAvg,counts):
             return step,"typical cheap hour for month %02d"%month
     return reserveMaxHours,"reserveMaxHours cap"
 
-def calcTerminalReserveWh():
+def calcTerminalReserveWh(priceList=None,useTerminalReserve=None,reserveFloorPct=None,
+                           ratedBatteryCapacity=None,reserveMarginPct=None,
+                           hourAvgPlanning=None,cheapQuantile=None,
+                           typicalCheapHourByMonth=None,reserveMaxHours=None):
     # how much charge must remain at the end of the planning window, in Wh
+    #
+    # Every parameter defaults to the module global (A2 step 2), same _fallback pattern
+    # as LPoptimization() and hourlyShapeFromPriceList(). LPoptimization() passes its own
+    # already-resolved priceList/ratedBatteryCapacity/hourAvgPlanning through when it
+    # calls this internally, so a test that hands LPoptimization() a custom priceList and
+    # leaves terminalReserveWh unset gets a reserve computed from THAT priceList, not a
+    # stale or undefined module global.
+    priceList=_fallback("priceList",priceList)
+    useTerminalReserve=_fallback("useTerminalReserve",useTerminalReserve)
+    reserveFloorPct=_fallback("reserveFloorPct",reserveFloorPct)
+    ratedBatteryCapacity=_fallback("ratedBatteryCapacity",ratedBatteryCapacity)
+    reserveMarginPct=_fallback("reserveMarginPct",reserveMarginPct)
     if not useTerminalReserve or len(priceList)==0:
         return 0
     floorWh=int(reserveFloorPct/100*ratedBatteryCapacity)
-    loadAvg,pvAvg,priceAvg,counts=hourlyShapeFromPriceList()
+    loadAvg,pvAvg,priceAvg,counts=hourlyShapeFromPriceList(
+        priceList=priceList,hourAvgPlanning=hourAvgPlanning)
 
     endHour=int(priceList[-1][3][11:13])
     # the window's last interval is the START of that hour, so the reserve begins after it
     startHour=(endHour+1)%24
     month=int(priceList[-1][3][5:7])
 
-    hoursNeeded,reason=hoursUntilRefill(startHour,month,loadAvg,pvAvg,priceAvg,counts)
+    hoursNeeded,reason=hoursUntilRefill(
+        startHour,month,loadAvg,pvAvg,priceAvg,counts,
+        cheapQuantile=cheapQuantile,typicalCheapHourByMonth=typicalCheapHourByMonth,
+        reserveMaxHours=reserveMaxHours)
     if hoursNeeded==0:
         # the window already ends at the refill opportunity: only the floor applies
         if outputMode or debug:
@@ -1886,7 +1920,14 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     # the next refill opportunity. Without it the objective values leftover energy at zero
     # and sells the battery down to the floor in the final hours.
     if terminalReserveWh is None:
-        terminalReserveWh=calcTerminalReserveWh()
+        # Pass the values THIS call already resolved (see the _fallback block above),
+        # not bare globals - so a test that hands LPoptimization() a custom priceList
+        # and leaves terminalReserveWh unset gets a reserve computed from that
+        # priceList, and the live path (nothing passed in, everything read from the
+        # module globals) is unchanged.
+        terminalReserveWh=calcTerminalReserveWh(
+            priceList=priceList,ratedBatteryCapacity=ratedBatteryCapacity,
+            hourAvgPlanning=hourAvgPlanning)
     if terminalReserveWh>0 and nrIntervals>0:
         prob += sockWh[nrIntervals-1] >= terminalReserveWh
 

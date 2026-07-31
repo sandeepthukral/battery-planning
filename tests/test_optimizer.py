@@ -11,32 +11,7 @@ Indices 4-8 are the ones LPoptimization() reads (forecastDirectIndex .. sellPric
 This installation has no direct-coupled group, so pvDirect (index 4) is always 0 - see
 the pvGroups comment block at the top of Marstek-planning.py.
 """
-import importlib.util
-import os
-
-import pytest
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
-
-
-def _loadPlanner():
-    # Loaded by path, same reason fit_pv_elevation.py does it: the filename has a
-    # hyphen, so it cannot be imported by name.
-    spec = importlib.util.spec_from_file_location(
-        "marstek_planning_under_test", os.path.join(REPO, "Marstek-planning.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    # Only ever set by processCLarguments(), which a unit test does not run. Read by
-    # LPoptimization()'s "relaxing the floor" diagnostic print.
-    mod.debug = False
-    mod.outputMode = False
-    return mod
-
-
-@pytest.fixture(scope="module")
-def planner():
-    return _loadPlanner()
+# `planner` fixture (loads Marstek-planning.py fresh per test) comes from conftest.py.
 
 
 def _row(seq, priceBuy, priceSell, pvIndirect=0, load=0, localTime="2026-01-01 %02d:00" % 0):

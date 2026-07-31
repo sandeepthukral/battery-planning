@@ -558,10 +558,10 @@ first.
 
 - [x] **A3** Add `influx_source.resetConfig()` so config is testable
 - [x] **A2 step 1** Give `LPoptimization()` explicit parameters defaulting to the globals
-- [ ] **A2 step 2** Same for `calcTerminalReserveWh()` and `hourlyShapeFromPriceList()`
+- [x] **A2 step 2** Same for `calcTerminalReserveWh()` and `hourlyShapeFromPriceList()`
 - [ ] **A1** Stand up `tests/` + `pytest` + the fixture set (see the test plan below)
 - [ ] **A1** Golden-file characterisation test: one fixed day in, exact plan out
-- [ ] **E8** CI: build the image, run the CBC smoke test, run `pytest`
+- [x] **E8** CI: build the image, run the CBC smoke test, run `pytest`
 
 ### Stage 1 — correctness and silent failure
 

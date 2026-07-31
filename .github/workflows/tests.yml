@@ -1,0 +1,44 @@
+name: tests
+
+# CODE-REVIEW.md Stage 0: the golden-file and unit tests only exist to catch a
+# refactor breaking something; that only works if they run on every push, not just
+# when someone remembers to run them by hand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the Dockerfile's python:3.12-slim base - a test passing on a
+          # different minor version proves nothing about what actually ships.
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        # The Dockerfile's own build-time steps do the real checking here: a CBC
+        # smoke test (the LP solver actually solves, not just imports) and a
+        # tzdata/zoneinfo check (Europe/Amsterdam resolves inside the slim base).
+        # A build that reaches FROM python:3.12-slim to the final layer without
+        # either of those RUN steps failing is what "the container still works"
+        # means for this repo - see the Dockerfile's own comments on why each
+        # check exists.
+        run: docker build -t battery-planner:ci .
