@@ -60,6 +60,42 @@ echo "$(stamp) report: starting for $DAY"
 
 mkdir -p data/reports
 
+# Keeps the newest 7 reports directly under data/reports (glanceable from the viewer's
+# root listing) and files everything older into data/reports/YYYY/MM/, derived from the
+# report_YYYYMMDD.txt filename rather than the run date - a backfilled or rerun day sorts
+# into the month it is about, not the month it happened to be generated in.
+#
+# Filenames are zero-padded YYYYMMDD, so lexicographic sort is chronological sort - no
+# date parsing needed to order them, only to build the destination path.
+#
+# Run twice per invocation: once before writing (tidies any backlog, e.g. the first run
+# after this feature shipped, and picks up files a previous run left behind), once after
+# (files today's report the moment it pushes the root past 7).
+archive_old_reports() {
+    dir="data/reports"
+    keep=7
+    files=$(find "$dir" -maxdepth 1 -type f -name 'report_????????.txt' | sort)
+    total=$(printf '%s\n' "$files" | grep -c 'report_' || true)
+    if [ "$total" -le "$keep" ]; then
+        return 0
+    fi
+    move_count=$((total - keep))
+    printf '%s\n' "$files" | head -n "$move_count" | while IFS= read -r f; do
+        base=$(basename "$f")
+        datepart=${base#report_}
+        datepart=${datepart%.txt}
+        destdir="$dir/$(echo "$datepart" | cut -c1-4)/$(echo "$datepart" | cut -c5-6)"
+        mkdir -p "$destdir"
+        mv "$f" "$destdir/"
+    done
+}
+archive_old_reports
+
+# A rerun of an already-archived day (e.g. `report.sh 2026-01-15` months later) would
+# otherwise leave a stale duplicate sitting in the archive while the fresh one lands in
+# root - drop the stale copy so there is only ever one copy of a given day's report.
+find data/reports -mindepth 2 -type f -name "report_$(echo "$DAY" | tr -d -).txt" -delete
+
 # --write stores the per-interval comparison as measurement plan_score, so the Grafana panel
 # queries the same numbers this text file shows instead of recomputing them in Flux and
 # disagreeing. The text file is the record a person reads.
@@ -88,6 +124,7 @@ rc=0
 # instead, so the next successful run overwrites it in the ordinary course of things.
 if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
     mv "$OUT.$$" "$OUT"
+    archive_old_reports
     cat "$OUT"
     echo "$(stamp) report: done (exit $rc) -> $OUT"
 else
