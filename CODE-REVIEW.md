@@ -556,8 +556,8 @@ first.
 
 ### Stage 0 — make change safe (do this first)
 
-- [ ] **A3** Add `influx_source.resetConfig()` so config is testable
-- [ ] **A2 step 1** Give `LPoptimization()` explicit parameters defaulting to the globals
+- [x] **A3** Add `influx_source.resetConfig()` so config is testable
+- [x] **A2 step 1** Give `LPoptimization()` explicit parameters defaulting to the globals
 - [ ] **A2 step 2** Same for `calcTerminalReserveWh()` and `hourlyShapeFromPriceList()`
 - [ ] **A1** Stand up `tests/` + `pytest` + the fixture set (see the test plan below)
 - [ ] **A1** Golden-file characterisation test: one fixed day in, exact plan out

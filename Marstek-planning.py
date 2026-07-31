@@ -1761,8 +1761,41 @@ def calcTerminalReserveWh():
 
 #### the actual optimsation function  #####
 
-def LPoptimization():
+def _fallback(name, value):
+    # value if the caller gave one, else the module-level global of the same name,
+    # read at CALL time (globals() bypasses the parameter's shadowing, so this sees
+    # whatever buildInitialPlanningList()/getUserInput() most recently set). The live
+    # path never passes these, so it is unaffected; a test can pass a hand-built
+    # priceList and every other input without touching a single module global.
+    return value if value is not None else globals()[name]
+
+def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None,
+                    maxChargeSpeed=None, maxDischargeSpeed=None, minBatterySOCPct=None,
+                    onewayEff=None, cycleCosts=None, hourAvgPlanning=None,
+                    gridConnectionLimit=None, gridLimitAppliesToExport=None,
+                    zeroGridCharge=None, terminalReserveWh=None):
     # lineair programming optimisationusing pulp library
+    #
+    # Every parameter defaults to None and falls back to the live module global (see
+    # _fallback above) - this is CODE-REVIEW.md's A2 step 1. terminalReserveWh is the
+    # one exception: passing it explicitly skips the calcTerminalReserveWh() call
+    # entirely, which still reads its OWN globals (that is A2 step 2, not yet done) -
+    # so a test that wants to check the reserve constraint in isolation, without also
+    # having to fake calcTerminalReserveWh()'s inputs, can just pass the number it
+    # wants enforced.
+    priceList = _fallback("priceList", priceList)
+    initialCharge = _fallback("initialCharge", initialCharge)
+    ratedBatteryCapacity = _fallback("ratedBatteryCapacity", ratedBatteryCapacity)
+    maxChargeSpeed = _fallback("maxChargeSpeed", maxChargeSpeed)
+    maxDischargeSpeed = _fallback("maxDischargeSpeed", maxDischargeSpeed)
+    minBatterySOCPct = _fallback("minBatterySOCPct", minBatterySOCPct)
+    onewayEff = _fallback("onewayEff", onewayEff)
+    cycleCosts = _fallback("cycleCosts", cycleCosts)
+    hourAvgPlanning = _fallback("hourAvgPlanning", hourAvgPlanning)
+    gridConnectionLimit = _fallback("gridConnectionLimit", gridConnectionLimit)
+    gridLimitAppliesToExport = _fallback("gridLimitAppliesToExport", gridLimitAppliesToExport)
+    zeroGridCharge = _fallback("zeroGridCharge", zeroGridCharge)
+
     nrIntervals = len(priceList)
 
     # BATTERY PARAMETERS, RTE split into equal parts for charge and discharge
@@ -1852,7 +1885,8 @@ def LPoptimization():
     # TERMINAL RESERVE, keep enough charge at the end of the window to cover the gap until
     # the next refill opportunity. Without it the objective values leftover energy at zero
     # and sells the battery down to the floor in the final hours.
-    terminalReserveWh=calcTerminalReserveWh()
+    if terminalReserveWh is None:
+        terminalReserveWh=calcTerminalReserveWh()
     if terminalReserveWh>0 and nrIntervals>0:
         prob += sockWh[nrIntervals-1] >= terminalReserveWh
 

@@ -147,6 +147,18 @@ def config():
     return _config
 
 
+def resetConfig():
+    """Forget the cached config so the next config() call re-reads the environment.
+
+    Only needed by tests: a real process reads its environment once at startup, so
+    caching is the right call there. A test process does not get that fresh start -
+    without this, a test that sets INFLUX_URL after any earlier test has already called
+    config() would silently see the earlier test's answer instead of its own.
+    """
+    global _config
+    _config = None
+
+
 def configured():
     c = config()
     return bool(c["url"] and c["token"])
