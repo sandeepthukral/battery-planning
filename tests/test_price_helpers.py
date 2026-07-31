@@ -113,3 +113,21 @@ def test_backtest_run_is_not_affected_by_the_guard(planner, monkeypatch):
     monkeypatch.setenv("BT_INITCHARGE", "5000")
     planner.getUserInput()   # must not raise
     assert planner.startdate == "20250701"
+
+
+# --- intervalsPerHour(): D2 -----------------------------------------------------------
+
+
+def test_intervals_per_hour_hourly_mode(planner):
+    assert planner.intervalsPerHour(hourAvgPlanning=True) == 1
+
+
+def test_intervals_per_hour_quarter_hour_mode(planner):
+    assert planner.intervalsPerHour(hourAvgPlanning=False) == 4
+
+
+def test_intervals_per_hour_defaults_to_the_module_global(planner):
+    planner.hourAvgPlanning = True
+    assert planner.intervalsPerHour() == 1
+    planner.hourAvgPlanning = False
+    assert planner.intervalsPerHour() == 4

@@ -586,12 +586,21 @@ function does too much) making itself felt. Worth returning to once Stage 3 deco
 
 ### Stage 2 — one source of truth
 
-- [ ] **D4** Extract hardware constants; `advise.py` and `report_day.py` stop holding their
+- [x] **D4** Extract hardware constants; `advise.py` and `report_day.py` stop holding their
       own copy of 27,900. **Do this before the capacity upgrade, not during it.**
-- [ ] **D2** One `intervalsPerHour()` helper replaces eight hardcoded `/4`
-- [ ] **D1** Module-level `IDX_*` constants for `priceList` positions
-- [ ] **D5** One `solar.py`; `clean_backtest_csv.py` and `fit_pv_elevation.py` import it
-- [ ] **E7** Share `HTTP_TIMEOUT`
+      (`hardware.py`; the planned capacity upgrade can now edit one file instead of three.)
+- [x] **D2** One `intervalsPerHour()` helper replaces eight hardcoded `/4`
+- [x] **D1** Module-level `IDX_*` constants for `priceList` positions
+- [x] **D5** One `solar.py`; `clean_backtest_csv.py` and `fit_pv_elevation.py` import it
+      (bonus: `fit_pv_elevation.py`'s `checkAgreement()` now compares exactly, not within
+      1° tolerance, since both sides call the same function)
+- [x] **E7** Share `HTTP_TIMEOUT` (`http_config.py`)
+
+Stage 2 done. Every fix verified behaviour-preserving before committing: the golden-file
+tests stayed byte-identical throughout, and `clean_backtest_csv.py`'s D5 refactor was
+additionally diffed byte-for-byte against its pre-refactor output over the real (gitignored)
+backtest CSV — output and sidecar both identical. The container was rebuilt locally and the
+new modules (`hardware`, `solar`, `http_config`) confirmed importable from inside it.
 
 ### Stage 3 — structure
 

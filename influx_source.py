@@ -53,9 +53,13 @@ Self-test:
 import csv as _csv
 import io
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 import requests
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import http_config
 
 try:
     from zoneinfo import ZoneInfo
@@ -187,7 +191,7 @@ def _query(flux):
         headers={"Authorization": "Token " + c["token"],
                  "Content-Type": "application/vnd.flux",
                  "Accept": "application/csv"},
-        timeout=30)
+        timeout=http_config.HTTP_TIMEOUT)
     resp.raise_for_status()
     return _parseAnnotatedCsv(resp.text)
 
@@ -282,7 +286,7 @@ def writePoints(lines, bucket=None, batch=1000):
             data="\n".join(chunk).encode("utf-8"),
             headers={"Authorization": "Token " + c["token"],
                      "Content-Type": "text/plain; charset=utf-8"},
-            timeout=30)
+            timeout=http_config.HTTP_TIMEOUT)
         if resp.status_code >= 400:
             # Influx puts the useful part in the body - which field collided, which line
             # failed to parse - and raise_for_status() throws all of it away.

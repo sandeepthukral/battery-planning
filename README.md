@@ -22,6 +22,9 @@ now, and a backtest path that replays historical data:
 | `fit_pv_elevation.py` | **PV calibration.** Reads the stored raw forecast.solar output against measured PV and reports both calibration knobs: the overall level (`pvOverallCalibration`) and the shape against sun elevation (`pvElevationLossCurve`). Says plainly when there is not yet enough data rather than fitting anyway. |
 | `solar-forecast.sh` | Runs `plan-now.sh` and prints just the forecast PV generation (Wh) for today, by hour. |
 | `influx_source.py` | Shared data-access module for the InfluxDB instance fed by `alphaess-collector` — battery SOC and recent hourly load/PV. This is the live data source; run `python3 influx_source.py` on its own as a connectivity self-test. |
+| `hardware.py` | The battery capacity in Wh, in one place. `Marstek-planning.py`, `advise.py` and `report_day.py` all import it, so a capacity change is a one-file edit. |
+| `solar.py` | Sun-elevation (NOAA approximation) and elevation-curve interpolation, in one place. Imported by `Marstek-planning.py`, `fit_pv_elevation.py` and `clean_backtest_csv.py`. |
+| `http_config.py` | The outbound HTTP timeout policy (connect/read seconds), shared by `Marstek-planning.py` and `influx_source.py`. |
 | `clean_backtest_csv.py` | Repairs the raw APsystems EMA hourly export (redistributes outage catch-up spikes, drops zero-load days) before it's used as backtest input. |
 | `influx_to_backtest_csv.py` | Exports recent measured load/PV from InfluxDB into the same CSV shape the backtester expects — a higher-fidelity alternative for recent days. |
 | `p1_to_backtest_csv.py` | Builds a backtest CSV from the Sparky P1 smart-meter export (pre-battery-installation period only, using the load = solar + delivery − return identity). |

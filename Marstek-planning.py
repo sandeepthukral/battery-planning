@@ -120,7 +120,9 @@ reserveMaxHours=24              # cap on how far ahead the reserve is asked to s
 # collector data once it is running and set the real numbers, exactly as was done for the
 # 5 kW unit. A 10 kW inverter also forces three-phase: 10 kW will not pass a single-phase
 # 25 A fuse (5750 W), so gridConnectionLimit below must move at the same time.
-ratedBatteryCapacity=27900      # Wh, AlphaESS
+import hardware
+ratedBatteryCapacity=hardware.CAPACITY_WH      # Wh, AlphaESS - see hardware.py (CODE-REVIEW.md D4):
+                                                # advise.py and report_day.py read the same constant
 maxChargeSpeed=4850             # W, measured p99 - see above before changing
 maxDischargeSpeed=4700          # W, measured p99
 # 6800 EUR all-in / (6000 cycles x 27.9 kWh x 90% DoD) = 0.0451 EUR per kWh discharged.
@@ -212,6 +214,9 @@ import paho.mqtt.client as mqtt
 
 import sqlite3
 from sqlite3 import Error
+
+import solar
+import http_config
 
 # Env overrides for settings declared in the configuration block above. They live here
 # because that block is evaluated before "import os".
@@ -930,7 +935,7 @@ def setBatteryAction(action,scheduleDateTime,power,schedule):
 
     fullSchedule="<br>date_______time__pvD__pvI___use__nett_chrgD_chrg_dscg__soc__imp__exp_pr-buy_pr-sell__cost<br>"
     for nr,record in enumerate(schedule):
-        fullSchedule=fullSchedule+"%16s %4d %4d %5d %5d %4d %4d %4d %4d %5d %5d %1.4f %1.4f %2.4f<br>" %(priceList[nr][3],priceList[nr][4],priceList[nr][5],priceList[nr][6],priceList[nr][6]-priceList[nr][5]-priceList[nr][4],priceList[nr][4],record["charge"],record["discharge"],record["soc"],record["import"],record["export"],priceList[nr][7],priceList[nr][8],record["costs"])
+        fullSchedule=fullSchedule+"%16s %4d %4d %5d %5d %4d %4d %4d %4d %5d %5d %1.4f %1.4f %2.4f<br>" %(priceList[nr][IDX_TIME_LOCAL],priceList[nr][IDX_PV_DIRECT],priceList[nr][IDX_PV_INDIRECT],priceList[nr][IDX_LOAD],priceList[nr][IDX_LOAD]-priceList[nr][IDX_PV_INDIRECT]-priceList[nr][IDX_PV_DIRECT],priceList[nr][IDX_PV_DIRECT],record["charge"],record["discharge"],record["soc"],record["import"],record["export"],priceList[nr][IDX_PRICE_BUY],priceList[nr][IDX_PRICE_SELL],record["costs"])
     fullSchedule=fullSchedule.replace(' ','_')  # JSON processing removes all duplicate spaces, so use underscore to get table format
 
     # send email confirmation via Domoticz email setup to confirm action set
@@ -1033,10 +1038,10 @@ def prunePVcache(keepHours=48):
     except Exception:
         pass
 
-# HTTP_TIMEOUT is (connect, read), applied to every outbound call on the live path.
-# A scheduled job that hangs forever is worse than one that fails: nothing reports it,
-# and the next run stacks up behind it.
-HTTP_TIMEOUT=(10,30)
+# (connect, read) seconds, applied to every outbound call on the live path. Shared
+# with influx_source.py via http_config.py (CODE-REVIEW.md E7) - one timeout policy,
+# not two copies of the same number.
+HTTP_TIMEOUT=http_config.HTTP_TIMEOUT
 
 _cacheWriteWarned=set()
 
@@ -1171,6 +1176,25 @@ def parsePVforecastIntoList(groupSpec):
 # summed over the panel groups. Filled by mergeForecastWithPricelist() and read by
 # writePlanToInflux(); see the comment there for why it is worth carrying separately.
 pvForecastRawWh={}
+
+# priceList row shape - one row per planning interval, built by parsePricesIntoList() /
+# getPricesFromEnergyZero() and read by roughly forty call sites across this file.
+#
+# CODE-REVIEW.md D1: those reads used to dereference a bare index number - interval[3],
+# priceList[nr][IDX_LOAD] - each one re-deriving "what is position 6" on its own, with no
+# single place that said so. LPoptimization() already had its own named aliases
+# (forecastDirectIndex etc.) for exactly this reason, but only inside that one
+# function - the rest of the file still could not see them. These replace both: the
+# scattered magic numbers AND LPoptimization()'s function-local versions.
+IDX_SEQ=0            # sequential interval number within the plan
+IDX_PRICE_KWH=1      # raw market price, EUR/kWh, before tax/VAT/saldering
+IDX_TIME_UTC=2       # interval start, UTC, "YYYY-MM-DD HH:MM" - the unambiguous one
+IDX_TIME_LOCAL=3     # interval start, Europe/Amsterdam, same format - repeats on the October DST night
+IDX_PV_DIRECT=4      # forecast/actual Wh from DC-coupled PV (always 0 here - no such group)
+IDX_PV_INDIRECT=5    # forecast/actual Wh from AC-coupled PV (both this installation's groups)
+IDX_LOAD=6           # forecast/actual house load, Wh
+IDX_PRICE_BUY=7      # price to pay for import, EUR/kWh, tax/VAT included
+IDX_PRICE_SELL=8     # price received for export, EUR/kWh - regime depends on salderingApplies()
 
 def parsePricesIntoList(runDate,hourAverage=False,local_tz="Europe/Amsterdam"):
     # process prices into a list, either per hour or per 15-minute interval
@@ -1407,7 +1431,11 @@ def findForecast(intervalDate,intervalHr,forecastList):
 _locationCache=None
 
 def solarElevation(intervalDate,intervalHr):
-    # solar elevation in degrees at the midpoint of the given local hour (NOAA approximation)
+    # solar elevation in degrees at the midpoint of the given local hour (NOAA
+    # approximation). The formula itself lives in solar.py (CODE-REVIEW.md D5) - this
+    # function's own job is resolving what THIS interval means: parsing the date/hour
+    # strings, adding the 30-minute hour-midpoint, and getting the site's lat/lon
+    # (cached after one HTTP call per run, not one per interval).
     try:
         localDT=datetime.strptime(intervalDate+" "+intervalHr,"%Y-%m-%d %H").replace(tzinfo=ZoneInfo("Europe/Amsterdam"))
     except ValueError:
@@ -1420,36 +1448,13 @@ def solarElevation(intervalDate,intervalHr):
     if not responseResult:
         return 90.0
     lat,lon=float(latitude),float(longitude)
-    n=utcDT.timestamp()/86400.0+2440587.5-2451545.0
-    meanLong=(280.460+0.9856474*n)%360
-    meanAnom=math.radians((357.528+0.9856003*n)%360)
-    eclipLong=math.radians(meanLong+1.915*math.sin(meanAnom)+0.020*math.sin(2*meanAnom))
-    obliquity=math.radians(23.439-0.0000004*n)
-    declination=math.asin(math.sin(obliquity)*math.sin(eclipLong))
-    rightAsc=math.atan2(math.cos(obliquity)*math.sin(eclipLong),math.cos(eclipLong))
-    gmst=(18.697374558+24.06570982441908*n)%24
-    localSidereal=(gmst+lon/15.0)%24
-    hourAngle=math.radians(((localSidereal*15.0-math.degrees(rightAsc)+180)%360)-180)
-    latRad=math.radians(lat)
-    elevation=math.asin(math.sin(latRad)*math.sin(declination)
-                        +math.cos(latRad)*math.cos(declination)*math.cos(hourAngle))
-    return math.degrees(elevation)
+    return solar.elevation(lat,lon,utcDT)
 
 def pvElevationCalibration(intervalDate,intervalHr):
     # fraction of the forecast this array actually delivers at this sun elevation, see
     # the pvElevationLossCurve comment block at the top of this file
-    elevation=solarElevation(intervalDate,intervalHr)
-    if elevation<=pvElevationLossCurve[0][0]:
-        return pvElevationLossCurve[0][1]
-    for i in range(1,len(pvElevationLossCurve)):
-        elevLow,factorLow=pvElevationLossCurve[i-1]
-        elevHigh,factorHigh=pvElevationLossCurve[i]
-        if elevation<=elevHigh:
-            span=elevHigh-elevLow
-            if span<=0:
-                return factorHigh
-            return factorLow+(factorHigh-factorLow)*(elevation-elevLow)/span
-    return pvElevationLossCurve[-1][1]
+    elevationDeg=solarElevation(intervalDate,intervalHr)
+    return solar.interpolate(pvElevationLossCurve,elevationDeg)
 
 def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
     # merge forecast onto pricelist as separate fields
@@ -1457,12 +1462,9 @@ def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
     # corrects forecast.solar's bias, and actuals carry no such bias
     global priceList,pvForecastRawWh
     for intervalNr,interval in enumerate(priceList):
-        intervalDate=interval[3][0:10] # date of local time in pricelist
-        intervalHr=interval[3][11:13]  # hour of local time in pricelist
-        if hourAvgPlanning:
-            pvForecast=findForecast(intervalDate,intervalHr,forecastList)
-        else:
-            pvForecast=round(findForecast(intervalDate,intervalHr,forecastList)/4) # some rounding is o.k.
+        intervalDate=interval[IDX_TIME_LOCAL][0:10] # date of local time in pricelist
+        intervalHr=interval[IDX_TIME_LOCAL][11:13]  # hour of local time in pricelist
+        pvForecast=round(findForecast(intervalDate,intervalHr,forecastList)/intervalsPerHour()) # some rounding is o.k.
         # Keep the uncalibrated number, summed across panel groups the same way the calibrated
         # one is. Without it only the product of three multipliers is ever recorded, and
         # forecast.solar's own accuracy cannot be separated from the corrections applied to it
@@ -1473,14 +1475,14 @@ def mergeForecastWithPricelist(groupSpec,forecastList,applyCalibration=False):
         # Keyed by the interval's UTC start, not by its position: dropHistoryFromPricelist()
         # pops from the front and dropUnpublishedFromPricelist() filters, both after this runs,
         # so an index would quietly come to mean a different interval.
-        pvForecastRawWh[interval[2]]=pvForecastRawWh.get(interval[2],0)+pvForecast
+        pvForecastRawWh[interval[IDX_TIME_UTC]]=pvForecastRawWh.get(interval[IDX_TIME_UTC],0)+pvForecast
         if applyCalibration and pvCalibrateForecast:
             pvForecast=round(pvForecast*pvElevationCalibration(intervalDate,intervalHr)
                              *pvOverallCalibration*pvPlanningFactor)
         if groupSpec[0]=="direct":
-            priceList[intervalNr][4]+=pvForecast
+            priceList[intervalNr][IDX_PV_DIRECT]+=pvForecast
         else:
-            priceList[intervalNr][5]+=pvForecast
+            priceList[intervalNr][IDX_PV_INDIRECT]+=pvForecast
     if outputMode:
         for record in priceList:
             print ("merged forecast ",record)
@@ -1503,12 +1505,9 @@ def mergeUsageWithPriceList(usageList):
     # merge usage estimate onto pricelist as separate fields
     global priceList
     for intervalNr,interval in enumerate(priceList):
-        intervalHr=interval[3][11:13]  # hour of local time in pricelist
-        if hourAvgPlanning:
-            hrAvgUsage=findAvgUsage(intervalHr,usageList)
-        else:
-            hrAvgUsage=int(findAvgUsage(intervalHr,usageList)/4) # some rounding will occur, no poblem
-        priceList[intervalNr][6]+=hrAvgUsage
+        intervalHr=interval[IDX_TIME_LOCAL][11:13]  # hour of local time in pricelist
+        hrAvgUsage=int(findAvgUsage(intervalHr,usageList)/intervalsPerHour()) # some rounding will occur, no poblem
+        priceList[intervalNr][IDX_LOAD]+=hrAvgUsage
     if outputMode:
         for record in priceList:
             print ("merged usage",record)
@@ -1530,13 +1529,10 @@ def mergeActualWithPricelist(actualList):
     # merge actual usage onto pricelist as separate fields
     global priceList
     for intervalNr,interval in enumerate(priceList):
-        intervalDate=interval[3][0:10] # date of local time in pricelist
-        intervalHr=interval[3][11:13]  # hour of local time in pricelist
-        if hourAvgPlanning:
-            actual=findActual(intervalDate,intervalHr,actualList)
-        else:
-            actual=int(findActual(intervalDate,intervalHr,actualList)/4) # some rounding is o.k.
-        priceList[intervalNr][6]+=actual
+        intervalDate=interval[IDX_TIME_LOCAL][0:10] # date of local time in pricelist
+        intervalHr=interval[IDX_TIME_LOCAL][11:13]  # hour of local time in pricelist
+        actual=int(findActual(intervalDate,intervalHr,actualList)/intervalsPerHour()) # some rounding is o.k.
+        priceList[intervalNr][IDX_LOAD]+=actual
     if outputMode:
         for record in priceList:
             print ("merged actual ",record)
@@ -1570,7 +1566,7 @@ def dropUnpublishedFromPricelist(runDate):
         return
     runDay=datetime.strftime(runDate,'%Y-%m-%d')
     before=len(priceList)
-    priceList=[interval for interval in priceList if interval[3][0:10]<=runDay]
+    priceList=[interval for interval in priceList if interval[IDX_TIME_LOCAL][0:10]<=runDay]
     if outputMode or debug:
         print("as-of %02d:00: next day prices not published until %02d:00, %d of %d intervals hidden"
               %(simulateAsOfHour,pricePublishHour,before-len(priceList),before))
@@ -1584,7 +1580,7 @@ def dropExcludedFromPricelist():
     excluded=backtestExcludedDates()
     if not excluded:
         return
-    priceList=[interval for interval in priceList if interval[3][0:10] not in excluded]
+    priceList=[interval for interval in priceList if interval[IDX_TIME_LOCAL][0:10] not in excluded]
 
 def getSOC(findHour,schedule):
     # find the SOC for the given hour, searching backwards from the end of the window.
@@ -1597,7 +1593,7 @@ def getSOC(findHour,schedule):
     # list does not reach findHour would have started the next day from the wrong
     # charge, with every later day inheriting the error and nothing reporting it.
     for checkRecord in range(len(priceList)-1,-1,-1):
-        if int(priceList[checkRecord][3][11:13])==findHour:
+        if int(priceList[checkRecord][IDX_TIME_LOCAL][11:13])==findHour:
             return schedule[checkRecord]["soc"]
     raise ValueError("getSOC: no interval for hour %d in priceList (%d interval(s))"
                       %(findHour,len(priceList)))
@@ -1730,14 +1726,14 @@ def hourlyShapeFromPriceList(priceList=None, hourAvgPlanning=None):
     priceSum=[0.0]*24
     counts=[0]*24
     for interval in priceList:
-        hr=int(interval[3][11:13])
-        loadSum[hr]+=interval[6]
-        pvSum[hr]+=interval[4]+interval[5]
-        priceSum[hr]+=interval[7]
+        hr=int(interval[IDX_TIME_LOCAL][11:13])
+        loadSum[hr]+=interval[IDX_LOAD]
+        pvSum[hr]+=interval[IDX_PV_DIRECT]+interval[IDX_PV_INDIRECT]
+        priceSum[hr]+=interval[IDX_PRICE_BUY]
         counts[hr]+=1
     # load and PV are per interval; at 15-min planning four intervals make an hour, and the
     # reserve is expressed in whole hours, so scale back up. Price is per kWh either way.
-    perHour=1 if hourAvgPlanning else 4
+    perHour=intervalsPerHour(hourAvgPlanning)
     loadAvg=[(loadSum[h]/counts[h])*perHour if counts[h] else 0.0 for h in range(24)]
     pvAvg=[(pvSum[h]/counts[h])*perHour if counts[h] else 0.0 for h in range(24)]
     priceAvg=[priceSum[h]/counts[h] if counts[h] else None for h in range(24)]
@@ -1805,10 +1801,10 @@ def calcTerminalReserveWh(priceList=None,useTerminalReserve=None,reserveFloorPct
     loadAvg,pvAvg,priceAvg,counts=hourlyShapeFromPriceList(
         priceList=priceList,hourAvgPlanning=hourAvgPlanning)
 
-    endHour=int(priceList[-1][3][11:13])
+    endHour=int(priceList[-1][IDX_TIME_LOCAL][11:13])
     # the window's last interval is the START of that hour, so the reserve begins after it
     startHour=(endHour+1)%24
-    month=int(priceList[-1][3][5:7])
+    month=int(priceList[-1][IDX_TIME_LOCAL][5:7])
 
     hoursNeeded,reason=hoursUntilRefill(
         startHour,month,loadAvg,pvAvg,priceAvg,counts,
@@ -1845,6 +1841,22 @@ def _fallback(name, value):
     # path never passes these, so it is unaffected; a test can pass a hand-built
     # priceList and every other input without touching a single module global.
     return value if value is not None else globals()[name]
+
+def intervalsPerHour(hourAvgPlanning=None):
+    # How many planning intervals make one hour: 1 in hourly mode, 4 in quarter-hour
+    # mode (the default since NL day-ahead moved to a 15-minute MTU on 2025-10-01).
+    #
+    # CODE-REVIEW.md D2: this exact "4" used to be spelled out independently at eight
+    # call sites (mergeForecastWithPricelist, mergeUsageWithPriceList,
+    # mergeActualWithPricelist, hourlyShapeFromPriceList, the grid connection limit and
+    # the charge/discharge bounds in LPoptimization), each guarded by its own
+    # `if hourAvgPlanning:`. It is load-bearing arithmetic on money - a ninth site added
+    # without the same guard would be a plan wrong by 4x with nothing to catch it.
+    #
+    # A quantity in Wh PER INTERVAL is an hourly Wh quantity divided by this; a
+    # per-interval quantity scaled UP to an hourly one is multiplied by it.
+    hourAvgPlanning = _fallback("hourAvgPlanning", hourAvgPlanning)
+    return 1 if hourAvgPlanning else 4
 
 def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None,
                     maxChargeSpeed=None, maxDischargeSpeed=None, minBatterySOCPct=None,
@@ -1890,12 +1902,14 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     Effcharge = onewayEff
     Effdischarge = onewayEff
 
-    # Indices for fields in priceList to make the code below more readable
-    forecastDirectIndex=4
-    forecastIndirectIndex=5
-    forecastUsageIndex=6
-    buyPriceIndex=7
-    sellPriceIndex=8
+    # Local, readable aliases for the module-level IDX_* constants (CODE-REVIEW.md D1) -
+    # kept because "forecastDirectIndex" reads better in the LP constraints below than
+    # "IDX_PV_DIRECT" would, not because the numbers themselves need re-declaring here.
+    forecastDirectIndex=IDX_PV_DIRECT
+    forecastIndirectIndex=IDX_PV_INDIRECT
+    forecastUsageIndex=IDX_LOAD
+    buyPriceIndex=IDX_PRICE_BUY
+    sellPriceIndex=IDX_PRICE_SELL
 
     # LP PROBLEM, we are aiming for maximum financial return
     prob = pulp.LpProblem("Battery_Optimization", pulp.LpMaximize)
@@ -1921,7 +1935,7 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     # per interval like the charge caps below: a Watt limit is Wh/interval only when the
     # interval is an hour. 0 (or None) leaves import/export unbounded, as before.
     if gridConnectionLimit:
-        gridLimitPerInterval=gridConnectionLimit if hourAvgPlanning else gridConnectionLimit/4
+        gridLimitPerInterval=gridConnectionLimit/intervalsPerHour(hourAvgPlanning)
     else:
         gridLimitPerInterval=None
     importWh = pulp.LpVariable.dicts("import", range(nrIntervals), lowBound=0, upBound=gridLimitPerInterval)
@@ -1949,12 +1963,8 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
         )
 
         # Charge / discharge limits
-        if hourAvgPlanning:
-            prob += chargeWh[t] <= maxChargeSpeed
-            prob += dischargeWh[t] <= maxDischargeSpeed
-        else:
-            prob += chargeWh[t] <= maxChargeSpeed/4
-            prob += dischargeWh[t] <= maxDischargeSpeed/4
+        prob += chargeWh[t] <= maxChargeSpeed/intervalsPerHour(hourAvgPlanning)
+        prob += dischargeWh[t] <= maxDischargeSpeed/intervalsPerHour(hourAvgPlanning)
 
         # SOC evolution, make the connection between intervals
         if t == 0:
@@ -2031,7 +2041,7 @@ def outputOptimisationResult(optimisationStatus,schedule,outputFileName,writeMod
             # output until 15:00 next day (excl)
             runDateString=datetime.strftime(runDate,'%Y-%m-%d')
             for nr,record in enumerate(schedule):
-                if priceList[nr][3][0:10]==runDateString or str(priceList[nr][3][11:13])<"15":
+                if priceList[nr][IDX_TIME_LOCAL][0:10]==runDateString or str(priceList[nr][IDX_TIME_LOCAL][11:13])<"15":
                     totalCosts+=record["costs"]
                     printIntervalToFile(nr,record,fileHandle)
         else:
@@ -2039,7 +2049,7 @@ def outputOptimisationResult(optimisationStatus,schedule,outputFileName,writeMod
             runDateString=datetime.strftime(runDate,'%Y-%m-%d')
             nextDateString=datetime.strftime(runDate+timedelta(days=1),'%Y-%m-%d')
             for nr,record in enumerate(schedule):
-                if ((priceList[nr][3][0:10]==runDateString and str(priceList[nr][3][11:13])>="15") or (priceList[nr][3][0:10]==nextDateString and str(priceList[nr][3][11:13])<"15")):
+                if ((priceList[nr][IDX_TIME_LOCAL][0:10]==runDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])>="15") or (priceList[nr][IDX_TIME_LOCAL][0:10]==nextDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])<"15")):
                     totalCosts+=record["costs"]
                     printIntervalToFile(nr,record,fileHandle)
 
@@ -2047,9 +2057,9 @@ def outputOptimisationResult(optimisationStatus,schedule,outputFileName,writeMod
 
 def printIntervalToFile(nr,record,fileHandle):
     # output one single line to a file
-    print( priceList[nr][3]+" "+"{:>5d}".format(priceList[nr][4])+" "+"{:>5d}".format(priceList[nr][5])+" "+"{:>5d}".format(priceList[nr][6])+" "+"{:>5d}".format(priceList[nr][6]-priceList[nr][5]-priceList[nr][4]), end=" ",file=fileHandle)
-    print("{:>5d}".format(priceList[nr][4])+" "+"{:>5d}".format(record["charge"])+" "+"{:>5d}".format(record["discharge"])+" "+"{:>5d}".format(record["soc"])+" "+"{:>5d}".format(record["import"])+" "+"{:>5d}".format(record["export"]),end=" ",file=fileHandle)
-    print("{:>+1.6f}".format(priceList[nr][7])+" "+"{:>+1.6f}".format(priceList[nr][8])+" "+"{:>+2.6f}".format(record["costs"]),file=fileHandle)
+    print( priceList[nr][IDX_TIME_LOCAL]+" "+"{:>5d}".format(priceList[nr][IDX_PV_DIRECT])+" "+"{:>5d}".format(priceList[nr][IDX_PV_INDIRECT])+" "+"{:>5d}".format(priceList[nr][IDX_LOAD])+" "+"{:>5d}".format(priceList[nr][IDX_LOAD]-priceList[nr][IDX_PV_INDIRECT]-priceList[nr][IDX_PV_DIRECT]), end=" ",file=fileHandle)
+    print("{:>5d}".format(priceList[nr][IDX_PV_DIRECT])+" "+"{:>5d}".format(record["charge"])+" "+"{:>5d}".format(record["discharge"])+" "+"{:>5d}".format(record["soc"])+" "+"{:>5d}".format(record["import"])+" "+"{:>5d}".format(record["export"]),end=" ",file=fileHandle)
+    print("{:>+1.6f}".format(priceList[nr][IDX_PRICE_BUY])+" "+"{:>+1.6f}".format(priceList[nr][IDX_PRICE_SELL])+" "+"{:>+2.6f}".format(record["costs"]),file=fileHandle)
 
 def writePlanToInflux(schedule,planRun):
     # Record the plan beside the actuals, so "what did we intend at 14:05?" is a query rather
@@ -2069,9 +2079,9 @@ def writePlanToInflux(schedule,planRun):
     for nr,record in enumerate(schedule):
         if nr>=len(priceList): break
         try:
-            # priceList[nr][2] is the interval start in UTC, which is the unambiguous one.
+            # priceList[nr][IDX_TIME_UTC] is the interval start in UTC, which is the unambiguous one.
             # The local string beside it repeats itself on the October DST night.
-            when=datetime.strptime(priceList[nr][2],"%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            when=datetime.strptime(priceList[nr][IDX_TIME_UTC],"%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
         except ValueError:
             continue
         lines.append(influx_source.linePoint("plan",
@@ -2083,10 +2093,10 @@ def writePlanToInflux(schedule,planRun):
              "export_wh":record["export"],
              "cost_eur":record["costs"],
              "reserve_wh":record.get("reserve",0),
-             "price_buy":priceList[nr][7],
-             "price_sell":priceList[nr][8],
+             "price_buy":priceList[nr][IDX_PRICE_BUY],
+             "price_sell":priceList[nr][IDX_PRICE_SELL],
              # The two panel groups are one roof as far as any dashboard is concerned.
-             "pv_forecast_wh":priceList[nr][4]+priceList[nr][5],
+             "pv_forecast_wh":priceList[nr][IDX_PV_DIRECT]+priceList[nr][IDX_PV_INDIRECT],
              # The same forecast before pvElevationCalibration(), pvOverallCalibration and
              # pvPlanningFactor are applied. Storing only the product makes forecast accuracy
              # and correction accuracy indistinguishable: an evening hour can read 74% under
@@ -2094,8 +2104,8 @@ def writePlanToInflux(schedule,planRun):
              # pvOverallCalibration is still an unfitted 1.00 and has to be fitted against the
              # raw number, so without this the fit has no input that outlives the 48-hour
              # pv_cache retention.
-             "pv_forecast_raw_wh":pvForecastRawWh.get(priceList[nr][2],0),
-             "load_forecast_wh":priceList[nr][6]},
+             "pv_forecast_raw_wh":pvForecastRawWh.get(priceList[nr][IDX_TIME_UTC],0),
+             "load_forecast_wh":priceList[nr][IDX_LOAD]},
             when))
     if not lines:
         return
@@ -2115,7 +2125,7 @@ def outputToTextDevice(schedule,starthour,writeMode,optimisationStatus):
     totalCosts=0
     for nrReversed,record in enumerate(reversed(schedule)):
             nr=len(priceList)-nrReversed-1
-            outputString="%10s %5d %5d %5d %5d %5d %5d %5d %5d %6d %6d  %1.4f  %1.4f  %2.4f" %(priceList[nr][3],priceList[nr][4],priceList[nr][5],priceList[nr][6],priceList[nr][6]-priceList[nr][5]-priceList[nr][4],priceList[nr][4],record["charge"],record["discharge"],record["soc"],record["import"],record["export"],priceList[nr][7],priceList[nr][8],record["costs"])
+            outputString="%10s %5d %5d %5d %5d %5d %5d %5d %5d %6d %6d  %1.4f  %1.4f  %2.4f" %(priceList[nr][IDX_TIME_LOCAL],priceList[nr][IDX_PV_DIRECT],priceList[nr][IDX_PV_INDIRECT],priceList[nr][IDX_LOAD],priceList[nr][IDX_LOAD]-priceList[nr][IDX_PV_INDIRECT]-priceList[nr][IDX_PV_DIRECT],priceList[nr][IDX_PV_DIRECT],record["charge"],record["discharge"],record["soc"],record["import"],record["export"],priceList[nr][IDX_PRICE_BUY],priceList[nr][IDX_PRICE_SELL],record["costs"])
             outputString=outputString.replace(' ','_')  # JSON processing removes all duplicate spaces, so use underscore to get table format
             setTextDevice(planningDisplayIDX,outputString)
             totalCosts+=record["costs"]
@@ -2130,10 +2140,10 @@ def outputToBattery(schedule,starthour,result):
     # send required action for next hour to the battery
     scheduleCurrentHr=schedule[0]
     priceListCurrentHr=priceList[0]
-    scheduleDateTime=priceListCurrentHr[3]
-    pvDirect=priceListCurrentHr[4]
-    pvIndirect=priceListCurrentHr[5]
-    usageForecast=priceListCurrentHr[6]
+    scheduleDateTime=priceListCurrentHr[IDX_TIME_LOCAL]
+    pvDirect=priceListCurrentHr[IDX_PV_DIRECT]
+    pvIndirect=priceListCurrentHr[IDX_PV_INDIRECT]
+    usageForecast=priceListCurrentHr[IDX_LOAD]
     chargeIndirect=scheduleCurrentHr["charge"]
     discharge=scheduleCurrentHr["discharge"]
     importWh=scheduleCurrentHr["import"]
@@ -2141,26 +2151,26 @@ def outputToBattery(schedule,starthour,result):
     soc=scheduleCurrentHr["soc"]
     # !!! to be done: this assume the planning is done at the beginning of the hour, to be adapted for partial hours when running at random time
     if importWh==0 and exportWh==0: #self-consumption
-        print("next hour",priceListCurrentHr[3]," action ","self-consumption")
+        print("next hour",priceListCurrentHr[IDX_TIME_LOCAL]," action ","self-consumption")
         setBatteryAction("AutoSelf",scheduleDateTime,0,schedule)
     else:
         if chargeIndirect==0 and discharge==0: # passive
-            print("next hour",priceListCurrentHr[3]," action ","passive")
+            print("next hour",priceListCurrentHr[IDX_TIME_LOCAL]," action ","passive")
             setBatteryAction("Passive",scheduleDateTime,0,schedule)
         else:
             if chargeIndirect>0: # manual charge
-                print("next hour",priceListCurrentHr[3]," action ","manual charge ",-1*chargeIndirect) # charge must be negative value
+                print("next hour",priceListCurrentHr[IDX_TIME_LOCAL]," action ","manual charge ",-1*chargeIndirect) # charge must be negative value
                 setBatteryAction("Manual",scheduleDateTime,-1*chargeIndirect,schedule)
             else:
                 if discharge>0: # manual discharge
                     #if discharge==maxDischargeSpeed or round((soc-discharge/onewayEff)/ratedBatteryCapacity,0)==minBatterySOCPct:
-                    #    print("next hour",priceListCurrentHr[3]," action ","self-consumption",discharge)
+                    #    print("next hour",priceListCurrentHr[IDX_TIME_LOCAL]," action ","self-consumption",discharge)
                     #    setBatteryAction("AutoSelf",scheduleDateTime,0,schedule)
                     #else:
-                    print("next hour",priceListCurrentHr[3]," action ","manual discharge ",discharge)
+                    print("next hour",priceListCurrentHr[IDX_TIME_LOCAL]," action ","manual discharge ",discharge)
                     setBatteryAction("Manual",scheduleDateTime,discharge,schedule)
                 else:
-                    print("next hour",priceListCurrentHr[3]," action ","don't know")
+                    print("next hour",priceListCurrentHr[IDX_TIME_LOCAL]," action ","don't know")
                     # don't know, should not exist
 
 def processCLarguments():

@@ -21,9 +21,11 @@ export price and is usually the more valuable of the two.
 import sys
 from datetime import datetime, timedelta
 
+import hardware
+
 COLS = ["date", "time", "pvD", "pvI", "use", "nett", "chrgD", "chrg", "dschg",
         "soc", "imp", "exp", "pr_buy", "pr_sell", "cost"]
-CAPACITY_WH = 27900          # only used to print SoC as a percentage
+CAPACITY_WH = hardware.CAPACITY_WH   # only used to print SoC as a percentage - see hardware.py
 
 
 def readPlan(path):
