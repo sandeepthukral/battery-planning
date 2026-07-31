@@ -625,11 +625,20 @@ the fix and printing a clean one-line error after.
 Everything here is inert while `useDomoticz=False`. Grouped so it can be done in one sitting
 if Domoticz is ever revived, and skipped entirely if it is not.
 
-- [ ] **B2** `except Exception:` replaces sixteen bare `except:`
-- [ ] **B3** Error handlers stop referencing a possibly-unbound `response`
-- [ ] **B4** Timeouts and URL escaping on the Domoticz calls
-- [ ] **B5** `setBatteryAction()` stops sending mail as a side effect
-- [ ] **C6** `calcHourlyAvgUsage()` binds `hourlyAvgs` before returning it
+- [x] **B2** `except Exception:` replaces sixteen bare `except:` (12 found in the file, not
+      16 - fixed all of them; the original count was an overestimate)
+- [x] **B3** Error handlers stop referencing a possibly-unbound `response`
+- [x] **B4** Timeouts and URL escaping on the Domoticz calls
+- [x] **B5** `setBatteryAction()` stops sending mail as a side effect
+- [x] **C6** `calcHourlyAvgUsage()` binds `hourlyAvgs` before returning it
+
+Stage 4 done. Every fix in this stage was verified as a REAL bug, not a theoretical one: each
+of B3, B5 and C6 was reverted in turn, its new test watched to fail with exactly the failure
+mode the review predicted (`UnboundLocalError` for B3/C6, an unconditional notification email
+for B5), then restored. `tests/test_domoticz_dead_path.py` covers all five items - these paths
+are dead only because `useDomoticz=False`; the tests exercise them directly by setting it
+`True` for the duration of one test, monkeypatching `requests` rather than reaching a real
+Domoticz host.
 
 ### Stage 5 — nice to have
 

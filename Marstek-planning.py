@@ -626,9 +626,15 @@ def getLocation():
     if not useDomoticz:
         # standalone: take the location from the configuration block instead of Domoticz
         return True,siteLatitude,siteLongitude
+    # CODE-REVIEW.md B3: response is set to None before the try, not left unbound, so
+    # the except block can safely check it - if requests.get() itself raised (DNS
+    # failure, connection refused, timeout), the old code referenced an undefined
+    # `response` INSIDE the error handler, replacing a clear message with a confusing
+    # UnboundLocalError. B4: timeout=HTTP_TIMEOUT, same policy as the live-path calls.
+    response=None
     try:
         apiCall="type=command&param=getsettings"
-        response = requests.get(baseJSON+apiCall)
+        response = requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
         responseResult=str(response.json())
         if responseResult=="ERR":
             raise Exception
@@ -636,9 +642,10 @@ def getLocation():
             latitude=response.json()["Location"]["Latitude"]
             longitude=response.json()["Location"]["Longitude"]
             responseResult=True
-    except:
-        print("ERROR: unable to retrieve the location settings")
-        print("Response was : ",response.json())
+    except Exception as e:
+        print("ERROR: unable to retrieve the location settings (%s)"%e)
+        if response is not None:
+            print("Response was : ",response.json())
         responseResult=False
         latitude=None
         longitude=None
@@ -646,27 +653,30 @@ def getLocation():
 
 def getUserVariable(varIDX):
     # function to get the value of a user variable indicated by the varIDX number
+    response=None   # CODE-REVIEW.md B3: guards the except block below, see getLocation()
     try:
         apiCall="type=command&param=getuservariable&idx="+str(varIDX)
-        response = requests.get(baseJSON+apiCall)
+        response = requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
         responseResult=str(response.json()["status"])
         if responseResult=="ERR":
             raise Exception
         else:
             varValue=response.json()["result"][0]["Value"]
             responseResult=True
-    except:
-        print("ERROR: unable to retrieve the value of user variable with IDX ",varIDX)
-        print("Response was : ",response.json())
+    except Exception as e:
+        print("ERROR: unable to retrieve the value of user variable with IDX ",varIDX," (%s)"%e)
+        if response is not None:
+            print("Response was : ",response.json())
         responseResult=False
         varValue=None
     return responseResult,varValue
 
 def getPercentageDevice(varIDX):
     # function to get the value of a percentage device indicated by the varIDX number
+    response=None   # CODE-REVIEW.md B3: guards the except block below, see getLocation()
     try:
         apiCall="type=command&param=getdevices&rid="+str(varIDX)
-        response = requests.get(baseJSON+apiCall)
+        response = requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
         responseResult=str(response.json()["status"])
         if responseResult=="ERR":
             raise Exception
@@ -674,9 +684,10 @@ def getPercentageDevice(varIDX):
             varString=response.json()["result"][0]["Data"]
             varValue=float(varString.split("%")[0])
             responseResult=True
-    except:
-        print("ERROR: unable to retrieve the value of device with IDX ",varIDX)
-        print("Response was : ",response.json())
+    except Exception as e:
+        print("ERROR: unable to retrieve the value of device with IDX ",varIDX," (%s)"%e)
+        if response is not None:
+            print("Response was : ",response.json())
         responseResult=False
         varValue=None
     return responseResult,varValue
@@ -687,24 +698,25 @@ def clearTextDevice(textIDX):
     if setTextDevice(textIDX,""):  # clear the text
         try:
             apiCall="type=command&param=clearlightlog&idx="+str(textIDX)
-            response=requests.get(baseJSON+apiCall)
+            response=requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
             responseResult=str(response.json()["status"])
             if responseResult=="ERR":
                 raise Exception
             else:
                 responseResult=True
-        except:
-            print("ERROR: log of text device with IDX ",textIDX," failed to clear.")
+        except Exception as e:
+            print("ERROR: log of text device with IDX ",textIDX," failed to clear (%s)."%e)
             responseResult=False
     return responseResult
 
 def setTextDevice(textIDX,displayText):
     # update the value of a text device and adds an entry to the device log file
+    response=None   # CODE-REVIEW.md B3: guards the except block below, see getLocation()
     try:
         if len(displayText)<=200:
             urlText=urllib.parse.quote(displayText)
             apiCall="type=command&param=udevice&idx="+str(textIDX)+"&nvalue=0&svalue="+urlText
-            response=requests.get(baseJSON+apiCall)
+            response=requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
             responseResult=str(response.json()["status"])
             if responseResult=="ERR":
                 raise Exception
@@ -713,44 +725,49 @@ def setTextDevice(textIDX,displayText):
         else:
             print("ERROR: displayText too long (max 200 characters).")
             raise Exception
-    except:
-        print("ERROR: failed to update text device with IDX ",textIDX)
-        print("Response was : ",response.json())
+    except Exception as e:
+        print("ERROR: failed to update text device with IDX ",textIDX," (%s)"%e)
+        if response is not None:
+            print("Response was : ",response.json())
         responseResult=False
     return responseResult
 
 
 def updatePowerDevice(deviceIDX,power):
     # update an electric power device
+    response=None   # CODE-REVIEW.md B3: guards the except block below, see getLocation()
     try:
         apiCall="type=command&param=udevice&idx="+str(deviceIDX)+"&nvalue=0&svalue="+str(power)
-        response=requests.get(baseJSON+apiCall)
+        response=requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
         responseResult=str(response.json()["status"])
         if responseResult=="ERR":
             raise Exception
         else:
             responseResult=True
-    except:
-        print("ERROR: failed to update power device with IDX ",deviceIDX)
-        print("Response was : ",response.json())
+    except Exception as e:
+        print("ERROR: failed to update power device with IDX ",deviceIDX," (%s)"%e)
+        if response is not None:
+            print("Response was : ",response.json())
         responseResult=False
     return responseResult
 
 
 def getHourlyDataFromShortHistory(varIDX):
     # get hourly history from meter device
+    response=None   # CODE-REVIEW.md B3: guards the except block below, see getLocation()
     try:
         apiCall="type=command&param=graph&sensor=counter&idx="+str(varIDX)+"&range=day"
-        response = requests.get(baseJSON+apiCall)
+        response = requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
         responseResult=str(response.json()["status"])
         if responseResult=="ERR":
             raise Exception
         else:
             varString=response.json()["result"]
             responseResult=True
-    except:
-        print("ERROR: unable to retrieve the values of device with IDX ",varIDX)
-        print("Response was : ",response.json())
+    except Exception as e:
+        print("ERROR: unable to retrieve the values of device with IDX ",varIDX," (%s)"%e)
+        if response is not None:
+            print("Response was : ",response.json())
         responseResult=False
         varString=None
     return responseResult,varString
@@ -779,6 +796,12 @@ def calcHourlyAvgUsage(varIDX,weightIncrease):
         print("         Set useDomoticz=True or useInflux=True, or supply a load forecast.")
         return False,[]
     responseResult,varString=getHourlyDataFromShortHistory(varIDX)
+    # Bound before the branch, not only inside it (CODE-REVIEW.md C6) - when
+    # getHourlyDataFromShortHistory() fails, responseResult is False and this used to
+    # reach `return responseResult,hourlyAvgs` with hourlyAvgs never assigned,
+    # raising UnboundLocalError instead of the (False, []) shape every other early
+    # return in this function already uses.
+    hourlyAvgs=[]
     if responseResult:
         hourlyAvgs= [[f"{hour:02d}", 0] for hour in range(24)]
         weight=1
@@ -832,7 +855,7 @@ def getBatteryChargeLevel():
         else:
             print("ERROR: retrieving actual charge percentage failed")
             raise Exception
-    except:
+    except Exception:
         print("ERROR: cannot get or calculate battery charge level")
         print("Response was : ",responseResult)
         responseResult=False
@@ -840,11 +863,12 @@ def getBatteryChargeLevel():
 
 def updateSelectorSwitch(varIDX,switchLevel):
     # update a selector switch to a switch level number
+    response=None   # CODE-REVIEW.md B3: guards the except block below, see getLocation()
     try:
         if type(switchLevel)==int:
             apiCall="type=command&param=switchlight&idx="+str(varIDX)+"&switchcmd=Set%20Level&level="+str(switchLevel)
             # note : unable to check whether level is valid, even invalid level will return status OK
-            response = requests.get(baseJSON+apiCall)
+            response = requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
             responseResult=str(response.json()["status"])
             if responseResult=="ERR":
                 raise Exception
@@ -853,9 +877,10 @@ def updateSelectorSwitch(varIDX,switchLevel):
         else:
             print("ERROR: incorrect type of switch level provided")
             raise Exception
-    except:
-        print("ERROR: unable to set the switch with IDX ",varIDX," to value ",switchLevel)
-        print("Response was : ",response.json())
+    except Exception as e:
+        print("ERROR: unable to set the switch with IDX ",varIDX," to value ",switchLevel," (%s)"%e)
+        if response is not None:
+            print("Response was : ",response.json())
         responseResult=False
     return responseResult
 
@@ -940,7 +965,7 @@ def setBatteryAction(action,scheduleDateTime,power,schedule):
             elif action=="UPS": setlevel=50
             updateSelectorSwitch(batterySwitchIDX,setLevel)
             responseResult=True
-        except:
+        except Exception:
             print("ERROR: unable to update device for setting battery action")
             responseResult=False
 
@@ -949,14 +974,27 @@ def setBatteryAction(action,scheduleDateTime,power,schedule):
         fullSchedule=fullSchedule+"%16s %4d %4d %5d %5d %4d %4d %4d %4d %5d %5d %1.4f %1.4f %2.4f<br>" %(priceList[nr][IDX_TIME_LOCAL],priceList[nr][IDX_PV_DIRECT],priceList[nr][IDX_PV_INDIRECT],priceList[nr][IDX_LOAD],priceList[nr][IDX_LOAD]-priceList[nr][IDX_PV_INDIRECT]-priceList[nr][IDX_PV_DIRECT],priceList[nr][IDX_PV_DIRECT],record["charge"],record["discharge"],record["soc"],record["import"],record["export"],priceList[nr][IDX_PRICE_BUY],priceList[nr][IDX_PRICE_SELL],record["costs"])
     fullSchedule=fullSchedule.replace(' ','_')  # JSON processing removes all duplicate spaces, so use underscore to get table format
 
-    # send email confirmation via Domoticz email setup to confirm action set
-    subject = "BATTERY: next action"+str(action)
-    messageBody = "Battery set to "+str(action)+" from "+starttimeString+" to "+endtimeString+" with power "+str(power)+" ( note: <0 is charge )"
-    messageBody=messageBody+fullSchedule
-    url = "http://127.0.0.1:8080/json.htm?type=command&param=sendnotification"
-    url += "&subject=\'" + subject + "\'"
-    url += "&body=\'" + messageBody + "\'"
-    sendemail = requests.get(url)
+    # Send an email confirmation via Domoticz's own email setup, to confirm the action
+    # that was set. CODE-REVIEW.md B5: this used to run unconditionally, even when the
+    # block above failed and responseResult is False - a "success" notification for a
+    # failed action is actively misleading, not just noise. Also used to hardcode
+    # http://127.0.0.1:8080, ignoring domoticzIP/domoticzPort; baseJSON is what every
+    # other Domoticz call in this file already uses. subject/messageBody are now
+    # URL-escaped (setTextDevice() already does this for its own text), and the
+    # response is checked and reported, not assigned to an unused variable.
+    if responseResult:
+        subject = "BATTERY: next action"+str(action)
+        messageBody = "Battery set to "+str(action)+" from "+starttimeString+" to "+endtimeString+" with power "+str(power)+" ( note: <0 is charge )"
+        messageBody=messageBody+fullSchedule
+        apiCall="type=command&param=sendnotification"
+        apiCall+="&subject="+urllib.parse.quote(subject)
+        apiCall+="&body="+urllib.parse.quote(messageBody)
+        try:
+            response=requests.get(baseJSON+apiCall,timeout=HTTP_TIMEOUT)
+            if str(response.json()["status"])=="ERR":
+                print("ERROR: failed to send battery-action notification email")
+        except Exception as e:
+            print("ERROR: failed to send battery-action notification email (%s)"%e)
 
     return responseResult
 
@@ -1155,7 +1193,7 @@ def loadPricesIntoFile(entsoeFileName,loadStartDate,loadEndDate):
         else:
             print("ERROR: no proper price file received")
             fileReceived=False
-    except:
+    except Exception:
         print("ERROR: no proper price file received")
         fileReceived=False
     return fileReceived
@@ -2249,7 +2287,7 @@ def processCLarguments():
             if sys.argv[i+1]=="-m": # mqtt marstek querying
                 mqttQuery=True
 
-    except:
+    except Exception:
         print("Following command line arguments are recognised: -t,-v,-q and -d,-s and -p and -z and -b and -n and -h")
         print("-t = full tracing, debug mode")
         print("-v = verbose mode, intermediate steps in planning are shown")
