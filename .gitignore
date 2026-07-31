@@ -5,6 +5,7 @@ results/
 entsoe-output*.txt
 entsoe*.xml
 __pycache__/
+.pytest_cache/
 .DS_Store
 
 # Household load/solar export - private, not for publication.
