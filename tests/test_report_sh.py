@@ -93,3 +93,48 @@ def test_failed_run_does_not_overwrite_yesterdays_good_report(repoDir, binDir):
     leftovers = list((repoDir / "data" / "reports").glob(OUT_NAME + ".*"))
     assert leftovers, "expected the failed run's output to be kept as OUT.$$"
     assert "Traceback" in leftovers[0].read_text()
+
+
+def test_archives_oldest_reports_once_root_exceeds_seven(repoDir, binDir):
+    """Newest 7 stay directly under data/reports; anything older is filed under
+    YYYY/MM, keyed off the filename's date, not the day this run happens to fire."""
+    reportsDir = repoDir / "data" / "reports"
+    # 7 pre-existing reports, oldest first, spanning a month boundary.
+    existing = [
+        "report_20260625.txt", "report_20260626.txt", "report_20260627.txt",
+        "report_20260628.txt", "report_20260629.txt", "report_20260630.txt",
+        "report_20260701.txt",
+    ]
+    for name in existing:
+        (reportsDir / name).write_text("old report\n")
+
+    stub = _writeStubDocker(binDir, "MONEY OUTCOMES FORECAST", exitCode=0)
+    result = _run(repoDir, stub)  # writes report_20260731.txt, an 8th root file
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    # oldest (report_20260625.txt) moved out, filed by its own date
+    assert not (reportsDir / "report_20260625.txt").exists()
+    assert (reportsDir / "2026" / "06" / "report_20260625.txt").read_text() == "old report\n"
+
+    # the remaining 7 newest, including today's, are still directly under data/reports
+    for name in existing[1:]:
+        assert (reportsDir / name).exists(), f"{name} should not have been archived yet"
+    assert (reportsDir / OUT_NAME).exists()
+
+
+def test_rerun_of_an_archived_day_replaces_the_archived_copy(repoDir, binDir):
+    """Rerunning a day that already got filed into YYYY/MM must not leave a stale
+    duplicate behind in the archive while the fresh copy sits in root."""
+    reportsDir = repoDir / "data" / "reports"
+    archived = reportsDir / "2026" / "01" / "report_20260115.txt"
+    archived.parent.mkdir(parents=True)
+    archived.write_text("stale old copy\n")
+
+    stub = _writeStubDocker(binDir, "fresh rerun output", exitCode=0)
+    result = _run(repoDir, stub, day="2026-01-15")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert not archived.exists(), "stale archived copy must be removed on rerun"
+    fresh = reportsDir / "report_20260115.txt"
+    assert fresh.exists()
+    assert "fresh rerun output" in fresh.read_text()
