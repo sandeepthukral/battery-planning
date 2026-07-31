@@ -84,6 +84,19 @@ services:
       - ${ARCHIVE_DIR:-/volume1/documents/battery-archive/battery-archive-20260730}:/archive:ro
     networks: [alphaess-net]
 
+  # Read-only viewer for data/reports/*.txt (report_day.py's daily narrative), so any past
+  # day is one URL away instead of a File Station trip. Directory listing at
+  # http://<nas-ip>:${REPORT_VIEWER_PORT:-8091}/, individual files at .../report_YYYYMMDD.txt.
+  # `up -d`, not `run --rm` like the planner - this one is a server, meant to stay up.
+  report-viewer:
+    image: nginx:alpine
+    ports:
+      - "${REPORT_VIEWER_PORT:-8091}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data/reports:/usr/share/nginx/html:ro
+    networks: [alphaess-net]
+
 networks:
   alphaess-net:
     # Confirmed on the NAS 2026-07-30. NOT alphaess-collector_alphaess-net, which also exists
