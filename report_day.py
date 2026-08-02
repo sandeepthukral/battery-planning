@@ -346,11 +346,32 @@ def sectionForecast(rows):
         print("   A daily total alone would hide the failure mode already seen once: on")
         print("   2026-07-29 forecast.solar missed a sunny evening by 43%, concentrated in a")
         print("   few hours rather than spread across the day.")
+    if loadRows:
+        print()
+        print("   load by hour (Wh)   forecast   measured   error")
+        for hour, group in hourly(loadRows).items():
+            f = sum(r["planLoad"] for r in group)
+            a = sum(r["actLoad"] for r in group)
+            if f < 1 and a < 1:
+                continue
+            print("   %s                %8.0f   %8.0f   %s" % (hour, f, a, pctErr(f, a)))
+        print()
+        print("   The load total above can be right while every hour in it is wrong: the")
+        print("   forecast is one hour-of-day curve, so a morning over-estimate and an evening")
+        print("   under-estimate of the same size cancel in the total and not in the plan.")
+        print("   Read the evening rows first. calcTerminalReserveWh() sizes the overnight")
+        print("   reserve from the forecast load in exactly those hours, with a flat 25%")
+        print("   margin that does not know which hours the forecast is worst in.")
     print()
     print("   pv_forecast_wh is the PLANNING forecast, not the raw forecast.solar number: it")
     print("   carries the elevation calibration, pvOverallCalibration, and the deliberate 0.85")
     print("   conservatism factor. A steady under-forecast here is partly that factor working")
     print("   as intended. Fitting pvOverallCalibration means reading this with that in mind.")
+    print()
+    print("   load_forecast_wh has no such correction to allow for. It is the last 7 complete")
+    print("   days of measured load, averaged per hour of day and weighted towards the recent")
+    print("   ones - so it is the house predicting itself, and one day's error here says very")
+    print("   little. fit_load_profile.py aggregates many days, which is where a bias shows.")
     print()
 
 
