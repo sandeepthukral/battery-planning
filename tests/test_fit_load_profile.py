@@ -112,6 +112,15 @@ def test_ratioRow_flags_a_thin_bucket_and_leaves_a_full_one_unflagged():
     assert not full.endswith("thin")
 
 
+def test_days_reads_as_prose_at_the_boundary():
+    """A bare %.0f prints "1 days" on exactly the shortest run - the one where the reader is
+    least sure what they are looking at."""
+    assert fl._days(1.0) == "1 day"
+    assert fl._days(1.4) == "1 day"
+    assert fl._days(2.75) == "3 days"
+    assert fl._days(30.0) == "30 days"
+
+
 def test_stderr_matches_a_hand_computed_value():
     # values 1, 2, 3: sample variance 1.0, so the standard error is sqrt(1/3).
     assert fl.stderr([1.0, 2.0, 3.0]) == pytest.approx((1.0 / 3.0) ** 0.5)
@@ -187,6 +196,81 @@ def test_collect_ignores_a_plan_run_made_after_the_interval(monkeypatch):
     d = fl.collect(7)
     assert d["rows"] == []
     assert d["planned"] == 0
+
+
+# --- what main() claims about its own data ----------------------------------------------
+#
+# The first live run asked for 30 days, got under three, and said "2026-07-03 -> 2026-08-02"
+# with a paragraph about weekends filling at 2/7 the rate - directly above a table showing
+# more weekend intervals than weekday ones. These cover the reporting, not the arithmetic.
+
+def _synthetic(dayCount, minutes=15, endingSunday=True):
+    """A run of complete days ending on a Sunday, so the weekday/weekend counts are known."""
+    step = timedelta(minutes=minutes)
+    perDay = 1440 // minutes
+    last = WEDNESDAY + timedelta(days=4)          # the Sunday of that week
+    if not endingSunday:
+        last = WEDNESDAY
+    rows = []
+    for d in range(dayCount):
+        day = last - timedelta(days=dayCount - 1 - d)
+        rows.extend((day + i * step, 500.0, 500.0) for i in range(perDay))
+    return rows
+
+
+def _runMain(monkeypatch, capsys, rows, asked, minutes=15):
+    monkeypatch.setattr(fl, "collect", lambda days: {
+        "rows": rows, "runs": 8 * asked, "start": rows[0][0], "stop": rows[-1][0],
+        "minutes": minutes, "planned": len(rows), "withField": len(rows)})
+    monkeypatch.setattr(ix, "configured", lambda: True)
+    assert fl.main([str(asked)]) == 0
+    return capsys.readouterr().out
+
+
+def test_header_reports_the_span_with_data_not_the_span_requested(monkeypatch, capsys):
+    out = _runMain(monkeypatch, capsys, _synthetic(3), asked=30)
+    first = out.splitlines()[0]
+    assert "2026-07-31" in first and "2026-08-02" in first
+    assert "2026-07-03" not in out          # the requested start, which has no data behind it
+    assert "the plan history does not go back that far" in out
+    assert "describes 3 days, not 30 days" in out
+
+
+def test_no_shortfall_note_when_the_history_covers_the_request(monkeypatch, capsys):
+    out = _runMain(monkeypatch, capsys, _synthetic(30), asked=30)
+    assert "does not go back that far" not in out
+
+
+def test_the_two_over_seven_claim_is_withheld_on_a_short_window(monkeypatch, capsys):
+    """Three days ending on a Sunday are 2/3 weekend. Stating the long-run rule here would
+    contradict the counts printed immediately above it."""
+    out = _runMain(monkeypatch, capsys, _synthetic(3), asked=30)
+    assert "Weekday/weekend split:" in out
+    assert "2/7" not in out
+    assert "says nothing about the long run" in out
+
+
+def test_the_two_over_seven_claim_is_made_once_the_window_can_support_it(monkeypatch, capsys):
+    out = _runMain(monkeypatch, capsys, _synthetic(30), asked=30)
+    assert "Weekends are 2/7 of the calendar" in out
+
+
+def test_the_wait_projection_uses_the_observed_rate_not_the_theoretical_one(monkeypatch, capsys):
+    """Two days of 15-minute data give each hour 8 intervals, so THIN=20 is 3 days off at the
+    observed 4/day. The projection must say so, and must flag itself as a floor."""
+    out = _runMain(monkeypatch, capsys, _synthetic(2), asked=30)
+    assert "TOO THIN to conclude anywhere" in out
+    assert "4.0 intervals per hour-of-day per day" in out
+    assert "in about 3 more days" in out
+    assert "treat it as a floor" in out
+
+
+def test_no_wait_is_projected_from_a_single_day(monkeypatch, capsys):
+    """One day is not a rate. Projecting from it produces a confident number built on one
+    observation, which is worse than declining to answer."""
+    out = _runMain(monkeypatch, capsys, _synthetic(1), asked=30)
+    assert "Too short a span to project" in out
+    assert "more day" not in out.split("Too short a span")[1]
 
 
 # --- CLI -------------------------------------------------------------------------------
