@@ -88,6 +88,14 @@ def stderr(values):
     return math.sqrt(var / n)
 
 
+def _days(n):
+    """"1 day" / "3 days", rounded. These sentences read as prose and a bare %.0f produces
+    "1 days" on exactly the shortest run, where the reader is least sure what they are
+    looking at."""
+    whole = int(round(n))
+    return "%d day%s" % (whole, "" if whole == 1 else "s")
+
+
 def isWeekend(when):
     return when.weekday() >= 5
 
@@ -170,10 +178,21 @@ def main(argv):
     totalFc = sum(r[1] for r in rows)
     totalAct = sum(r[2] for r in rows)
 
+    # The window asked for and the window with data in it are routinely different, and
+    # printing the former invites reading a handful of intervals as a month's worth. Report
+    # what was actually scored, and name the gap when it is large.
+    first, last = rows[0][0], rows[-1][0]
+    coveredDays = (last - first).total_seconds() / 86400.0 + d["minutes"] / 1440.0
+    full = 1440.0 / d["minutes"]                       # intervals in a complete day
     print("Load forecast against measured, %s -> %s"
-          % (d["start"].strftime("%Y-%m-%d"), d["stop"].strftime("%Y-%m-%d")))
-    print("%d intervals of %d minutes, from %d plan runs\n"
-          % (len(rows), d["minutes"], d["runs"]))
+          % (first.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")))
+    print("%d intervals of %d minutes, from %d plan runs - %.1f days' worth in a %.0f day span"
+          % (len(rows), d["minutes"], d["runs"], len(rows) / full, coveredDays))
+    if coveredDays < days - 1:
+        print("Asked for %d days; the plan history does not go back that far. Everything below"
+              % days)
+        print("describes %s, not %d days." % (_days(coveredDays), days))
+    print()
 
     # --- LEVEL -------------------------------------------------------------------------
     print("LEVEL")
@@ -234,22 +253,45 @@ def main(argv):
     if thin and len(thin) == len(hours):
         # Naming all 24 hours is not a diagnosis, it is the whole table again. On a short run
         # that is the only case, and it deserves the shorter sentence.
-        # Per day each hour gains 60/minutes intervals, so the wait is in days only after
-        # dividing by that. At the 15-minute MTU the two differ by a factor of four.
-        perDay = max(1, int(round(60.0 / d["minutes"])))
-        wait = int(math.ceil((THIN - min(len(v) for v in hours.values())) / float(perDay)))
         print("TOO THIN to conclude anywhere: every hour has under %d intervals. Nothing"
               % THIN)
-        print("below the LEVEL block is worth reading yet - come back in about %d day%s."
-              % (max(1, wait), "" if max(1, wait) == 1 else "s"))
+        print("below the LEVEL block is worth reading yet.")
+        # The wait is projected from the rate this run actually observed, not from the
+        # theoretical 1440/minutes per day. Those are the same number only if every interval
+        # of every day carries a plan, which is exactly what a short history does not do -
+        # so assuming it produces an estimate that is optimistic precisely when it is being
+        # relied on. Below two days of span there is no rate to project from at all.
+        shortest = min(len(v) for v in hours.values())
+        if coveredDays >= 2:
+            perDay = shortest / coveredDays
+            wait = int(math.ceil((THIN - shortest) / perDay)) if perDay > 0 else None
+            if wait:
+                print("At the rate this run saw - %.1f intervals per hour-of-day per day - the"
+                      % perDay)
+                print("thinnest hour reaches %d in about %d more day%s, if plans keep arriving at"
+                      % (THIN, wait, "" if wait == 1 else "s"))
+                print("that rate. They have not been arriving that long, so treat it as a floor.")
+        else:
+            print("Too short a span to project when that changes: come back after a few more")
+            print("days and this will be able to estimate it.")
     elif thin:
         print("TOO THIN to conclude in these hours (under %d intervals): %s"
               % (THIN, ", ".join("%02d:00" % h for h in thin)))
     if weekend:
-        print("Weekend intervals fill at 2/7 the rate of weekday ones, so the weekend column is")
-        print("always the thinner of the two and always the later one to trust: over %d days it"
-              % days)
-        print("carries %d intervals against the weekday %d." % (len(weekend), len(weekday)))
+        # Over a long run weekends are 2/7 of the days and the weekend column is always the
+        # thinner one. Over a short one the window can straddle a weekend and the counts come
+        # out the other way round - as they did on the first real run, 142 weekend against 122
+        # weekday. Stating the 2/7 rule there contradicts the table directly above it, so the
+        # counts are reported first and the rule is only drawn when the span can support it.
+        print("Weekday/weekend split: %d weekday intervals, %d weekend."
+              % (len(weekday), len(weekend)))
+        if coveredDays < 14:
+            print("Over %s that ratio says nothing about the long run - a window this short is"
+                  % _days(coveredDays))
+            print("dominated by which days of the week it happens to contain.")
+        else:
+            print("Weekends are 2/7 of the calendar, so the weekend column fills at under half")
+            print("the weekday rate and is always the later of the two to become trustworthy.")
     print("None of this separates a bad profile from a genuinely unusual fortnight. A single")
     print("hot week, a holiday, or one appliance failing will move these ratios exactly like a")
     print("systematic bias does, and only a longer run tells them apart.")
