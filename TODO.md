@@ -87,6 +87,35 @@ measured daily, on the dashboard and in the text report. If it is small, this is
 the complexity; if it is systematically worse at weekends, the dashboard will say so and the
 fix is obvious. Measuring first costs a week and nothing else.
 
+`fit_load_profile.py`'s DAY TYPE table is the instrument for this. As of 2026-08-02 it has
+about three days of plan history, so it is not readable yet; it needs roughly three weeks.
+
+### A temperature term in the load forecast
+
+Last on the list of forecast improvements, behind day-type bucketing, sub-hourly shape and a
+longer profile window, and it is the only one needing a data source the house does not have.
+Do not start it until those three are exhausted -- and note that in a Dutch summer this house
+may show no temperature dependence at all, which would say nothing about January.
+
+The data is being collected in the meantime, by `capture_weather.py` on the planner's schedule
+and `backfill_weather.py` for history, because a forecast that was never stored cannot be
+scored later. Nothing reads it.
+
+### Weather lives in the `planning` bucket, which is the wrong bucket
+
+`weather_observed` and `weather_forecast` are actuals and forecasts about the outside world,
+not plan output, and they belong beside load and PV in `alphaess`. They are in `planning`
+because the planner's token is read:alphaess + write:planning, so it is the only bucket this
+repo can write to at all.
+
+The cost is retention: `planning` expires at 400 days, `alphaess` never does. So a fit that
+one day wants five winters of temperature against load will find the early ones gone.
+
+Accepted rather than fixed, because observations can be re-backfilled from a free API at any
+time — `backfill_weather.py --from <date>` — so the loss is recoverable with one command. The
+forecast series is not recoverable, and that is the part to watch: if it is still wanted in
+2027, either move the writer into alphaess-collector or widen the token.
+
 ### `BT_ETAX` is a single global, but energy tax is per calendar year
 
 0.12286 in 2025, 0.11085 in 2026. `plan-now.sh` picks by year and warns for 2027, so the
