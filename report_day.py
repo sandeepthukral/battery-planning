@@ -100,12 +100,38 @@ def fmtDelta(value, unit, betterWhenLower=True):
 
 
 def collect(day):
-    """Everything the report needs, at the plan's own resolution."""
+    """Everything the report needs for one local day."""
     start, stop = dayBounds(day)
+    d = collectWindow(start, stop)
+    if d is not None:
+        d["day"] = day
+    return d
+
+
+def collectWindow(start, stop, planRun=None):
+    """Everything the report needs, at the plan's own resolution.
+
+    Split out of collect() so report_window.py can ask the same question of an arbitrary
+    window without restating what an interval's row contains. One definition of a row means
+    the day report and the window report cannot quietly disagree about, say, which sign of
+    battery_power_w is a discharge.
+
+    planRun pins every interval to one stored run instead of the in-force one. The day
+    report never wants this - it scores advice as a follower would have received it - but a
+    drift investigation does, because switching runs mid-window hides the drift: every new
+    run restarts from the measured SoC, so the gap it is meant to measure resets to zero.
+    """
     points = ix.planPoints(start, stop, PLAN_MEASUREMENT)
     if not points:
         return None
-    chosen, firstRun, runsSeen = inForcePlans(points)
+    if planRun is not None:
+        pinned = [p for p in points if p["plan_run"] == planRun]
+        if not pinned:
+            return None
+        chosen = {p["time"]: p for p in pinned}
+        firstRun, runsSeen = ix._parse_time(planRun), 1
+    else:
+        chosen, firstRun, runsSeen = inForcePlans(points)
     minutes = intervalMinutes({p["time"] for p in points})
 
     grid = ix.intervalEnergyWh(ix.FIELD_GRID, start, stop, minutes)
@@ -143,7 +169,7 @@ def collect(day):
             "actPv": pv.get(t),
             "actLoad": load.get(t),
         })
-    return {"day": day, "start": start, "stop": stop, "minutes": minutes,
+    return {"start": start, "stop": stop, "minutes": minutes,
             "rows": rows, "planned": len(chosen), "expected": expected,
             "firstRun": firstRun, "runsSeen": runsSeen,
             "actualIntervals": len(grid)}
