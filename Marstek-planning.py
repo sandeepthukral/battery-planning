@@ -217,6 +217,7 @@ from sqlite3 import Error
 
 import solar
 import http_config
+import app_bands
 
 # Env overrides for settings declared in the configuration block above. They live here
 # because that block is evaluated before "import os".
@@ -2104,6 +2105,39 @@ def printIntervalToFile(nr,record,fileHandle):
     print("{:>5d}".format(priceList[nr][IDX_PV_DIRECT])+" "+"{:>5d}".format(record["charge"])+" "+"{:>5d}".format(record["discharge"])+" "+"{:>5d}".format(record["soc"])+" "+"{:>5d}".format(record["import"])+" "+"{:>5d}".format(record["export"]),end=" ",file=fileHandle)
     print("{:>+1.6f}".format(priceList[nr][IDX_PRICE_BUY])+" "+"{:>+1.6f}".format(priceList[nr][IDX_PRICE_SELL])+" "+"{:>+2.6f}".format(record["costs"]),file=fileHandle)
 
+def appSettingLines(planRows,planRun):
+    # The plan follows no price threshold - it solves the whole horizon - but the alphaess
+    # app can only be given one sell-above/buy-below pair at a time. app_bands works
+    # backwards from the plan to the pair that reproduces it, per trading session, so the
+    # app can be retuned by hand a couple of times a day instead of guessed at.
+    #
+    # Written here rather than derived in the dashboard's Flux because the interesting part
+    # is not the query but the arithmetic: whether a threshold exists that trades in exactly
+    # the planned intervals and no others. That needs tests over seeded scenarios, and a
+    # query buried in generated dashboard JSON cannot have any.
+    if not planRows:
+        return []
+    out=[]
+    for s in app_bands.appSettings(planRows):
+        out.append(influx_source.linePoint("app_setting",
+            {"plan_run":planRun,"action":s["action"]},
+            {"set_to_eur_kwh":s["setTo"],
+             # Stored as seconds rather than a timestamp because an Influx field cannot
+             # hold a time; the dashboard turns it back into one.
+             "until_s":int(s["until"].timestamp()),
+             "target_soc_wh":s["targetSocWh"],
+             # False when no single threshold reproduces the plan over the window this
+             # setting is live for. `extra` counts the intervals that then trade against
+             # the plan's wishes - the dashboard shows both rather than hiding a number
+             # that cannot do what it claims.
+             "exact":1 if s["exact"] else 0,
+             "extra_intervals":s["extra"],
+             "intervals":s["intervals"],
+             "energy_wh":s["energyWh"]},
+            s["start"]))
+    return out
+
+
 def writePlanToInflux(schedule,planRun):
     # Record the plan beside the actuals, so "what did we intend at 14:05?" is a query rather
     # than a hunt through text files, and so plan-vs-actual becomes one dashboard instead of
@@ -2119,6 +2153,7 @@ def writePlanToInflux(schedule,planRun):
     if not writePlansToInflux or influx_source is None or not influxAvailable:
         return
     lines=[]
+    planRows=[]
     for nr,record in enumerate(schedule):
         if nr>=len(priceList): break
         try:
@@ -2150,6 +2185,17 @@ def writePlanToInflux(schedule,planRun):
              "pv_forecast_raw_wh":pvForecastRawWh.get(priceList[nr][IDX_TIME_UTC],0),
              "load_forecast_wh":priceList[nr][IDX_LOAD]},
             when))
+        planRows.append({"ts":when,
+                         # Market price, not IDX_PRICE_BUY: the alphaess app's High/Low
+                         # bands are set against the market signal, not the all-in price
+                         # this optimiser minimises.
+                         "price":priceList[nr][IDX_PRICE_KWH],
+                         "charge":record["charge"],
+                         "discharge":record["discharge"],
+                         "import":record["import"],
+                         "export":record["export"],
+                         "soc":record["soc"]})
+    lines.extend(appSettingLines(planRows,planRun))
     if not lines:
         return
     try:
