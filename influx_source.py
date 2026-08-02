@@ -168,6 +168,19 @@ def configured():
     return bool(c["url"] and c["token"])
 
 
+def envValue(key, default=""):
+    """One setting, resolved the way config() resolves its own: real environment, then
+    this repo's .env, then the default. An empty value falls through rather than winning.
+
+    Here so that a module with settings of its own - weather_source.py's lat/lon - reads
+    them from the same two places, in the same order, without either reaching into
+    _read_env_file() or growing a second .env parser that could disagree with this one.
+    Not for InfluxDB settings: those belong in config(), which caches.
+    """
+    fromfile = _read_env_file(os.environ.get("INFLUX_ENV_FILE", DEFAULT_ENV_FILE))
+    return os.environ.get(key) or fromfile.get(key) or default
+
+
 def _query(flux):
     """POST a Flux query, return parsed rows as dicts. Raises on transport failure."""
     c = config()

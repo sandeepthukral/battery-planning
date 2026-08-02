@@ -46,5 +46,17 @@ echo "$(stamp) plan: starting"
 rc=0
 docker compose run --rm --no-deps planner || rc=$?
 
+# Record what the weather forecast said at this moment. Deliberately AFTER the plan and
+# deliberately non-fatal: nothing in the planner consumes this data, and nothing will until a
+# temperature term in the load forecast is actually justified, so a weather outage must never
+# delay or fail a plan. Its own exit code is reported and then dropped.
+#
+# It rides this schedule rather than getting one of its own because the point of the series is
+# to be contemporaneous with the plan it would have informed - a forecast captured at some
+# unrelated hour cannot be lined up against a plan run afterwards.
+wrc=0
+docker compose run --rm --no-deps planner python3 /app/capture_weather.py || wrc=$?
+[ "$wrc" -eq 0 ] || echo "$(stamp) plan: weather capture failed (exit $wrc) - plan unaffected"
+
 echo "$(stamp) plan: done (exit $rc)"
 exit $rc
