@@ -2173,6 +2173,15 @@ def writePlanToInflux(schedule,planRun):
              "reserve_wh":record.get("reserve",0),
              "price_buy":priceList[nr][IDX_PRICE_BUY],
              "price_sell":priceList[nr][IDX_PRICE_SELL],
+             # The raw market price the two above are built from, stored as well because the
+             # dashboard draws that one - it is the signal the alphaess app's High/Low bands are
+             # set against, and price_buy/price_sell cannot be turned back into it (tax, VAT and
+             # saldering are not invertible per interval). Until now that line came from the
+             # collector's own Frank feed, refreshed every 3 hours, so tomorrow's half of the
+             # horizon was blank for hours after the plan had already optimised against it -
+             # and even once filled it was a second feed that need not agree slot for slot.
+             # Same value planRows uses below, so the line and the bands cannot drift apart.
+             "price_market":priceList[nr][IDX_PRICE_KWH],
              # The two panel groups are one roof as far as any dashboard is concerned.
              "pv_forecast_wh":priceList[nr][IDX_PV_DIRECT]+priceList[nr][IDX_PV_INDIRECT],
              # The same forecast before pvElevationCalibration(), pvOverallCalibration and
