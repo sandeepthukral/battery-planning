@@ -1067,12 +1067,18 @@ def getHrValueFromBIGDB(runDate,device):
     return hourValueList
 
 def pvCacheFileName(groupSpec,runNow=None):
-    # one cache entry per panel group per clock hour. The hour bucket is deliberate: a
-    # scheduled run every 3 hours must get a fresh forecast, but a retry, a manual re-run
-    # or a debugging loop inside the same hour must not spend another request. The free
-    # tier allows about 12 requests per hour per IP and two panel groups exhaust it fast.
+    # one cache entry per panel group per BT_PV_CACHE_HOURS-wide bucket (default 3h). The
+    # bucket is wider than the clock hour on purpose: it decouples how often we spend a
+    # forecast.solar request from how often the planner runs, so an hourly planner can still
+    # recheck SoC and prices every run without a fresh PV fetch on every one of them - a
+    # retry, a manual re-run or a debugging loop inside the same bucket also rides the same
+    # cache entry. The free tier allows about 12 requests per hour per IP and two panel
+    # groups exhaust it fast if every run were a miss.
     cacheDir=os.environ.get("BT_PV_CACHE","pv_cache")
-    stamp=(runNow or localNow()).strftime("%Y%m%d%H")
+    bucketHours=int(os.environ.get("BT_PV_CACHE_HOURS","3"))
+    now=runNow or localNow()
+    bucketStart=(now.hour//bucketHours)*bucketHours
+    stamp=now.strftime("%Y%m%d")+"%02d"%bucketStart
     key="%s_%s_%s_%s"%(groupSpec[1],groupSpec[2],groupSpec[3],stamp)
     return os.path.join(cacheDir,key.replace("/","_")+".json")
 
