@@ -2165,6 +2165,17 @@ def writePlanToInflux(schedule,planRun):
         lines.append(influx_source.linePoint("plan",
             {"plan_run":planRun},
             {"soc_wh":record["soc"],
+             # The capacity soc_wh is a fraction OF, travelling with the number it explains.
+             # Every consumer that renders a percentage divides by this, and until now each
+             # kept its own copy - nine of them across two repos and two units. A capacity
+             # change that missed one rendered a plausible, wrong percentage rather than an
+             # error, and nothing detected the half-done migration.
+             #
+             # ratedBatteryCapacity, NOT hardware.CAPACITY_WH: BT_CAP and the Domoticz user
+             # variable both override it, so the default is not necessarily what this plan
+             # was optimised against. Publishing the default would reintroduce the same
+             # mismatch one layer down, and on backtests it would be wrong every time.
+             "capacity_wh":ratedBatteryCapacity,
              "charge_wh":record["charge"],
              "discharge_wh":record["discharge"],
              "import_wh":record["import"],
