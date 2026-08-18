@@ -1136,7 +1136,8 @@ def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
         pvMaxPeak=groupSpec[3]
         if allResponseOK:
             url=urlwebsite+urldoctype+"/"+latitude+"/"+longitude+"/"+str(pvAngle)+"/"+str(pvAzimuth)+"/"+str(pvMaxPeak)+"?full=1"
-            response = requests.get(url,timeout=HTTP_TIMEOUT)
+            # Retried, but NOT on the 429 the branch below decodes - see HTTP_RETRY_STATUSES.
+            response = http_config.getWithRetries(url,"forecast.solar")
             if response.status_code == 200:
                 # saving the json file
                 with open(pvForecastFileName, 'wb') as f:
@@ -1191,7 +1192,10 @@ def loadPricesIntoFile(entsoeFileName,loadStartDate,loadEndDate):
         # creating HTTP response object from given url
         if debug: print("Getting data from entsoe.eu for ",loadStartDate," to ",loadEndDate)
         if debug: print(url)
-        response = requests.get(url,timeout=HTTP_TIMEOUT)
+        # Worth retrying even though the except below already degrades to EnergyZero: riding
+        # out a blip keeps the run on its PRIMARY price source instead of silently switching.
+        # `what` is a label, not the url, which carries entsoeToken.
+        response = http_config.getWithRetries(url,"ENTSOE")
         if response.status_code == 200:
             # saving the xml file
             with open(entsoeFileName, 'wb') as f:
@@ -1418,8 +1422,22 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
         with open(cacheFile) as cf:
             responseText=cf.read()
     else:
-        response=requests.get(url,timeout=HTTP_TIMEOUT)
-        if response.status_code == 200:
+        # CODE-REVIEW.md E9. The try is the point of this block, not decoration. Before it, a
+        # requests.get() that RAISED - which is what a DNS failure does - propagated out of
+        # here and killed the whole run, while a non-200 from the very same endpoint quietly
+        # fell back to the cache two lines down. The 13:05 run of 2026-08-18 died that way,
+        # losing the first plan of the day that could see tomorrow's prices. One failure, two
+        # spellings, two completely different outcomes; now both take the cache path.
+        response=None
+        try:
+            response=http_config.getWithRetries(url,"EnergyZero")
+        except requests.RequestException as e:
+            # scrubQuery for the same reason getWithRetries uses it: requests quotes the
+            # failing url back inside the exception. Nothing secret is in THIS query, but a
+            # rule that only applies to the endpoints someone remembered is not a rule.
+            print("WARNING: EnergyZero unreachable after retries (%s)"
+                  %http_config.scrubQuery(e,url))
+        if response is not None and response.status_code == 200:
             responseText=response.text
             try:
                 os.makedirs(cacheDir,exist_ok=True)
@@ -1429,7 +1447,13 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
                 warnCacheWrite(cacheFile,e)
         elif os.path.exists(cacheFile):
             # refetch failed (network hiccup): fall back to whatever was cached rather than
-            # returning nothing
+            # returning nothing.
+            #
+            # A TODAY entry here can predate tomorrow's day-ahead auction, so this can return
+            # a plan horizon that stops tonight. That is deliberate and it is safe: advise.py
+            # --min-hours 12 fails the run when the horizon is too short (CODE-REVIEW.md C1a),
+            # so a short plan is reported, not mistaken for a good one. A stale-but-checked
+            # plan beats no plan.
             with open(cacheFile) as cf:
                 responseText=cf.read()
 
