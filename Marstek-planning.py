@@ -2017,7 +2017,12 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     for t in range(elapsedIntervals):
         prob += chargeWh[t]==0
         prob += dischargeWh[t]==0
-    if elapsedIntervals and (outputMode or debug):
+    # Printed unconditionally, unlike most of this file. plan-now.sh runs with -s -p -u -b,
+    # none of which set outputMode, so every "outputMode or debug" line below is dead on the
+    # scheduled path - which is the only path that matters at 03:00. These two lines are one
+    # per run and they are the ones that answer "why did the plan not buy": without them the
+    # 2026-08-19 diagnosis had to be reconstructed from Influx, interval by interval.
+    if elapsedIntervals:
         print("%d interval(s) of this window already started before %s UTC; no charge or "
               "discharge planned there"%(elapsedIntervals,planningNowUtc.strftime('%Y-%m-%d %H:%M')))
 
@@ -2037,11 +2042,10 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
         relaxThrough=min(nrIntervals,elapsedIntervals+max(1,climbIntervals))
         for t in range(relaxThrough):
             sockWh[t].lowBound=int(initialCharge)
-        if outputMode or debug:
-            print("initial charge %d Wh is below the %d%% floor (%d Wh); relaxing the floor "
-                  "through interval %d (%d elapsed + %d to climb at %d W)"%(
-                  int(initialCharge),minBatterySOCPct,socFloorWh,relaxThrough-1,
-                  elapsedIntervals,max(1,climbIntervals),maxChargeSpeed))
+        print("initial charge %d Wh is below the %d%% floor (%d Wh); relaxing the floor "
+              "through interval %d (%d elapsed + %d to climb at %d W)"%(
+              int(initialCharge),minBatterySOCPct,socFloorWh,relaxThrough-1,
+              elapsedIntervals,max(1,climbIntervals),maxChargeSpeed))
     # Grid connection limit. maxChargeSpeed bounds the battery; this bounds the meter, and
     # the two are different numbers because the house load rides on the same fuse. Expressed
     # per interval like the charge caps below: a Watt limit is Wh/interval only when the
