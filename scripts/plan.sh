@@ -1,7 +1,6 @@
 #!/bin/sh
-# One planning pass, for DSM Task Scheduler. Run as root, every 3 hours from 02:05, giving
-# 02/05/08/11/14/17/20/23. The 14:05 run is the first to see tomorrow's day-ahead prices,
-# published around 13:00.
+# One planning pass, for DSM Task Scheduler. Run as root, hourly at :05. The run at or after
+# 13:05 is the first to see tomorrow's day-ahead prices, published around 13:00.
 #
 # Advice only. Nothing here sends anything to the battery.
 #
@@ -14,16 +13,17 @@ export PATH
 
 REPO_DIR="/volume1/docker/battery-planning"
 LOCK_DIR="$REPO_DIR/data/.plan.lock"
-STALE_MINUTES=60
+STALE_MINUTES=20
 
 cd "$REPO_DIR"
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 # Don't let a slow run collide with the next firing. A stuck run holding the lock forever
-# would silently stop all planning, so a lock older than an hour is treated as abandoned -
-# a plan takes a minute or two, and the schedule fires every three hours, so an hour is well
-# clear of a healthy run and well short of the next one.
+# would silently stop all planning, so a lock older than 20 minutes is treated as abandoned -
+# a plan takes a minute or two, and the schedule fires hourly, so 20 minutes is well clear of
+# a healthy run and well short of the next one. (At the old 3-hourly cadence this was 60,
+# a third of the 180-minute gap; 20 keeps the same ratio against the new 60-minute gap.)
 if [ -d "$LOCK_DIR" ] && [ -z "$(find "$LOCK_DIR" -maxdepth 0 -mmin +$STALE_MINUTES 2>/dev/null)" ]; then
     echo "$(stamp) plan: another run still holds $LOCK_DIR - skipping this one"
     exit 0

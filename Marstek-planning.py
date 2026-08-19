@@ -1086,12 +1086,18 @@ def getHrValueFromBIGDB(runDate,device):
     return hourValueList
 
 def pvCacheFileName(groupSpec,runNow=None):
-    # one cache entry per panel group per clock hour. The hour bucket is deliberate: a
-    # scheduled run every 3 hours must get a fresh forecast, but a retry, a manual re-run
-    # or a debugging loop inside the same hour must not spend another request. The free
-    # tier allows about 12 requests per hour per IP and two panel groups exhaust it fast.
+    # one cache entry per panel group per BT_PV_CACHE_HOURS-wide bucket (default 3h). The
+    # bucket is wider than the clock hour on purpose: it decouples how often we spend a
+    # forecast.solar request from how often the planner runs, so an hourly planner can still
+    # recheck SoC and prices every run without a fresh PV fetch on every one of them - a
+    # retry, a manual re-run or a debugging loop inside the same bucket also rides the same
+    # cache entry. The free tier allows about 12 requests per hour per IP and two panel
+    # groups exhaust it fast if every run were a miss.
     cacheDir=os.environ.get("BT_PV_CACHE","pv_cache")
-    stamp=(runNow or localNow()).strftime("%Y%m%d%H")
+    bucketHours=int(os.environ.get("BT_PV_CACHE_HOURS","3"))
+    now=runNow or localNow()
+    bucketStart=(now.hour//bucketHours)*bucketHours
+    stamp=now.strftime("%Y%m%d")+"%02d"%bucketStart
     key="%s_%s_%s_%s"%(groupSpec[1],groupSpec[2],groupSpec[3],stamp)
     return os.path.join(cacheDir,key.replace("/","_")+".json")
 
@@ -1149,7 +1155,8 @@ def loadPVforecastIntoFile(groupSpec,pvForecastFileName):
         pvMaxPeak=groupSpec[3]
         if allResponseOK:
             url=urlwebsite+urldoctype+"/"+latitude+"/"+longitude+"/"+str(pvAngle)+"/"+str(pvAzimuth)+"/"+str(pvMaxPeak)+"?full=1"
-            response = requests.get(url,timeout=HTTP_TIMEOUT)
+            # Retried, but NOT on the 429 the branch below decodes - see HTTP_RETRY_STATUSES.
+            response = http_config.getWithRetries(url,"forecast.solar")
             if response.status_code == 200:
                 # saving the json file
                 with open(pvForecastFileName, 'wb') as f:
@@ -1204,7 +1211,10 @@ def loadPricesIntoFile(entsoeFileName,loadStartDate,loadEndDate):
         # creating HTTP response object from given url
         if debug: print("Getting data from entsoe.eu for ",loadStartDate," to ",loadEndDate)
         if debug: print(url)
-        response = requests.get(url,timeout=HTTP_TIMEOUT)
+        # Worth retrying even though the except below already degrades to EnergyZero: riding
+        # out a blip keeps the run on its PRIMARY price source instead of silently switching.
+        # `what` is a label, not the url, which carries entsoeToken.
+        response = http_config.getWithRetries(url,"ENTSOE")
         if response.status_code == 200:
             # saving the xml file
             with open(entsoeFileName, 'wb') as f:
@@ -1431,8 +1441,22 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
         with open(cacheFile) as cf:
             responseText=cf.read()
     else:
-        response=requests.get(url,timeout=HTTP_TIMEOUT)
-        if response.status_code == 200:
+        # CODE-REVIEW.md E9. The try is the point of this block, not decoration. Before it, a
+        # requests.get() that RAISED - which is what a DNS failure does - propagated out of
+        # here and killed the whole run, while a non-200 from the very same endpoint quietly
+        # fell back to the cache two lines down. The 13:05 run of 2026-08-18 died that way,
+        # losing the first plan of the day that could see tomorrow's prices. One failure, two
+        # spellings, two completely different outcomes; now both take the cache path.
+        response=None
+        try:
+            response=http_config.getWithRetries(url,"EnergyZero")
+        except requests.RequestException as e:
+            # scrubQuery for the same reason getWithRetries uses it: requests quotes the
+            # failing url back inside the exception. Nothing secret is in THIS query, but a
+            # rule that only applies to the endpoints someone remembered is not a rule.
+            print("WARNING: EnergyZero unreachable after retries (%s)"
+                  %http_config.scrubQuery(e,url))
+        if response is not None and response.status_code == 200:
             responseText=response.text
             try:
                 os.makedirs(cacheDir,exist_ok=True)
@@ -1442,7 +1466,13 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
                 warnCacheWrite(cacheFile,e)
         elif os.path.exists(cacheFile):
             # refetch failed (network hiccup): fall back to whatever was cached rather than
-            # returning nothing
+            # returning nothing.
+            #
+            # A TODAY entry here can predate tomorrow's day-ahead auction, so this can return
+            # a plan horizon that stops tonight. That is deliberate and it is safe: advise.py
+            # --min-hours 12 fails the run when the horizon is too short (CODE-REVIEW.md C1a),
+            # so a short plan is reported, not mistaken for a good one. A stale-but-checked
+            # plan beats no plan.
             with open(cacheFile) as cf:
                 responseText=cf.read()
 
@@ -2246,6 +2276,17 @@ def writePlanToInflux(schedule,planRun):
         lines.append(influx_source.linePoint("plan",
             {"plan_run":planRun},
             {"soc_wh":record["soc"],
+             # The capacity soc_wh is a fraction OF, travelling with the number it explains.
+             # Every consumer that renders a percentage divides by this, and until now each
+             # kept its own copy - nine of them across two repos and two units. A capacity
+             # change that missed one rendered a plausible, wrong percentage rather than an
+             # error, and nothing detected the half-done migration.
+             #
+             # ratedBatteryCapacity, NOT hardware.CAPACITY_WH: BT_CAP and the Domoticz user
+             # variable both override it, so the default is not necessarily what this plan
+             # was optimised against. Publishing the default would reintroduce the same
+             # mismatch one layer down, and on backtests it would be wrong every time.
+             "capacity_wh":ratedBatteryCapacity,
              "charge_wh":record["charge"],
              "discharge_wh":record["discharge"],
              "import_wh":record["import"],

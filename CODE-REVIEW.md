@@ -546,6 +546,50 @@ nothing checking that the pins still install and still solve — the Dockerfile'
 test does exactly that, but only when somebody builds. Once CI exists (Stage 0), building
 the image is the natural first job.
 
+### E9. A transient network failure kills the whole run — **observed in production**
+
+`Marstek-planning.py:getPricesFromEnergyZero`. Found by a real failure, not by reading:
+
+```
+2026-08-18 13:05:01 plan: starting
+requests.exceptions.ConnectionError: HTTPSConnectionPool(host='public.api.energyzero.nl',
+  port=443): ... Failed to resolve 'public.api.energyzero.nl'
+  ([Errno -3] Temporary failure in name resolution)
+2026-08-18 13:05:14 plan: done (exit 1)
+```
+
+Thirteen seconds start to finish. The home network hiccuped, DNS returned instantly, nothing
+retried, and the run was lost — and it was the 13:05 run, the first of the day that can see
+tomorrow's day-ahead prices (`scripts/plan.sh`'s own header says so). The next firing is an
+hour away, so one blip lasting seconds cost two hours of plan freshness.
+
+Two separate defects, and the second is the interesting one:
+
+1. **No retry anywhere on the live path.** Three outbound calls carry the plan —
+   forecast.solar, ENTSOE, EnergyZero — and each got exactly one attempt. The planner runs
+   hourly behind a 20-minute lock; it has minutes of headroom it was not using.
+2. **The same failure had two spellings with two different outcomes.** EnergyZero answering
+   `503` fell back to the price cache; `requests.get` *raising* propagated out and killed the
+   run. Identical cause, one survivable and one fatal, decided by whether the failure arrived
+   as a status code or as an exception.
+
+**Fix:** `http_config.getWithRetries()` — the module that already owns the timeout policy now
+owns the retry policy too. A 5/15/30 s ladder, so roughly a minute of patience: long enough
+for a lease renewal or a router reboot, short enough to stay well inside the lock. Transport
+errors and 5xx are retried; **429 is not**, because forecast.solar's free tier resets on the
+hour and retrying it only spends the next run's budget. And `getPricesFromEnergyZero` catches
+`RequestException` so both spellings take the cache path.
+
+One thing the fix had to be careful about: retry logging means printing exception text on a
+path that never printed any, and requests quotes the failing url - query string included -
+inside the exception. The ENTSOE url carries `securityToken=`. `scrubQuery()` redacts every
+query string before it reaches a log, so the retry logging did not smuggle a credential leak
+in with it.
+
+Not a licence to serve stale prices silently: a cache entry written before the 13:00 auction
+holds no prices for tomorrow, so the plan horizon comes up short and `advise.py --min-hours
+12` fails the run (C1a). Degraded and reported, rather than fatal or silent.
+
 ---
 
 ## Prioritised plan
@@ -646,9 +690,20 @@ Domoticz host.
 - [ ] **E2** `plan.sh`'s lock matches its own comment
 - [ ] **E4** `solar-forecast.sh` reads instead of planning
 - [ ] **E5** One Flux query for mean and count
-- [ ] **E6** One retry on InfluxDB 5xx
+- [ ] **E6** One retry on InfluxDB 5xx — now that `http_config.getWithRetries()` exists (E9),
+      this is applying it to `influx_source.py`'s two POSTs, not writing anything new. Note
+      those are POSTs: writes carry explicit timestamps and so are idempotent, but that is an
+      argument to be made in the diff, not assumed.
 - [ ] **D10** Write down the per-file style rule
 - [ ] **A2 step 3** `PlanningConfig` dataclass — only if Stages 0-3 made it obvious
+
+### Found later, in production
+
+Not part of the original review. Listed here so the numbering keeps meaning something.
+
+- [x] **E9** Retry the live path's HTTP calls; a raised error takes the same cache fallback a
+      non-200 already did. Verified by mutation: reverting the `try` around the EnergyZero
+      fetch reproduces the exact `ConnectionError` traceback from the 13:05 log.
 
 ---
 

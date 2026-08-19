@@ -59,9 +59,52 @@ def _write(planner, monkeypatch):
 def test_the_fields_the_dashboard_queries_are_all_present(planner, monkeypatch):
     fields = _fields(_plan_lines(planner, monkeypatch)[0])
     assert set(fields) == {
-        "soc_wh", "charge_wh", "discharge_wh", "import_wh", "export_wh", "cost_eur",
-        "reserve_wh", "price_buy", "price_sell", "price_market", "pv_forecast_wh",
-        "pv_forecast_raw_wh", "load_forecast_wh"}
+        "soc_wh", "capacity_wh", "charge_wh", "discharge_wh", "import_wh", "export_wh",
+        "cost_eur", "reserve_wh", "price_buy", "price_sell", "price_market",
+        "pv_forecast_wh", "pv_forecast_raw_wh", "load_forecast_wh"}
+
+
+def test_every_point_carries_the_capacity_soc_is_a_fraction_of(planner, monkeypatch):
+    """alphaess-collector's dashboards divide soc_wh by their OWN copy of 27900.
+
+    hardware.py fixed that drift inside this repo (CODE-REVIEW.md D4) but cannot reach
+    across the boundary, because no test in either repo crosses it -- so a capacity change
+    applied on one side and not the other renders a plausible, wrong percentage rather than
+    an error. Sending the number with the data it explains is what removes the copies.
+    """
+    lines = _plan_lines(planner, monkeypatch)
+    assert lines
+    for line in lines:
+        assert float(_fields(line)["capacity_wh"]) == float(planner.ratedBatteryCapacity)
+
+
+def test_it_is_the_capacity_this_plan_was_optimised_against(planner, monkeypatch):
+    """`ratedBatteryCapacity`, NOT `hardware.CAPACITY_WH`.
+
+    BT_CAP and the Domoticz user variable both override it, so the default is not
+    necessarily what a given plan was planned against -- on a backtest it is wrong every
+    time. Publishing the default would move the same mismatch one layer down and hide it
+    better, so this is pinned rather than left to the reader of the line above.
+    """
+    monkeypatch.setattr(planner, "ratedBatteryCapacity", 12345)
+    for line in _plan_lines(planner, monkeypatch):
+        assert float(_fields(line)["capacity_wh"]) == 12345.0
+
+
+def test_the_default_run_publishes_the_shared_constant(planner, monkeypatch):
+    """The ordinary case, tying this back to hardware.py: with nothing overridden, what
+    reaches InfluxDB is the same number tests/test_hardware.py guards."""
+    import hardware
+    line = _plan_lines(planner, monkeypatch)[0]
+    assert float(_fields(line)["capacity_wh"]) == float(hardware.CAPACITY_WH)
+
+
+def test_capacity_is_a_field_not_a_tag(planner, monkeypatch):
+    """A tag would start a fresh series on every capacity change, and tags are indexed
+    strings -- the consumers need a number to divide by."""
+    line = _plan_lines(planner, monkeypatch)[0]
+    tags = dict(kv.split("=", 1) for kv in line.split(" ")[0].split(",")[1:])
+    assert set(tags) == {"plan_run"}
 
 
 def test_price_market_is_the_raw_market_price_not_the_all_in_one(planner, monkeypatch):
