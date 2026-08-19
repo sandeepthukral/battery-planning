@@ -296,6 +296,14 @@ except ImportError as e:
 #
 # Setting TZ=Europe/Amsterdam in the container is still worth doing - it makes log
 # timestamps agree with these - but the program no longer depends on it.
+# Verbosity flags. Set for real by getRunOptions() on the CLI path, but declared here so
+# that importing this module and calling a function directly - which is what tests/conftest.py
+# and any future caller does - cannot die on a NameError inside a print guard. They were
+# previously only ever assigned inside main(), which left every "outputMode or debug" in the
+# file reachable before its own flag existed.
+outputMode=False
+debug=False
+
 planningTZname=os.environ.get("BT_TZ","Europe/Amsterdam")
 try:
     planningTZ=ZoneInfo(planningTZname)
@@ -314,6 +322,17 @@ def localNow():
 
 def localToday():
     return localNow().date()
+
+def utcNow():
+    """Current time in UTC, as a naive datetime.
+
+    Companion to localNow(). The priceList carries interval starts in both zones
+    (IDX_TIME_UTC / IDX_TIME_LOCAL) and only the UTC one is unambiguous - the local
+    string repeats itself on the October DST night, so "has this interval started
+    yet" cannot be answered from it. Naive for the same reason localNow() is: the
+    rest of this file compares naive datetimes throughout.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 today=localToday()
 todayString=datetime.strftime(today,'%Y%m%d')
@@ -1884,11 +1903,24 @@ def intervalsPerHour(hourAvgPlanning=None):
     hourAvgPlanning = _fallback("hourAvgPlanning", hourAvgPlanning)
     return 1 if hourAvgPlanning else 4
 
+def _intervalStartUtc(interval):
+    """One priceList row -> its start instant, as a naive UTC datetime.
+
+    IDX_TIME_UTC is "YYYY-MM-DD HH:MM" and IDX_TIME_LOCAL is the same instant in
+    Europe/Amsterdam. Only the UTC column can answer "has this started yet": the local
+    one repeats an hour on the October DST night, so 02:30 there names two instants an
+    hour apart and the comparison would silently pick the wrong one - once a year, in
+    the dark, with no failing test.
+    """
+    return datetime.strptime(interval[IDX_TIME_UTC],'%Y-%m-%d %H:%M')
+
+
 def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None,
                     maxChargeSpeed=None, maxDischargeSpeed=None, minBatterySOCPct=None,
                     onewayEff=None, cycleCosts=None, hourAvgPlanning=None,
                     gridConnectionLimit=None, gridLimitAppliesToExport=None,
-                    zeroGridCharge=None, terminalReserveWh=None):
+                    zeroGridCharge=None, terminalReserveWh=None,
+                    planningNowUtc=None):
     # lineair programming optimisationusing pulp library
     #
     # Every parameter defaults to None and falls back to the live module global (see
@@ -1955,16 +1987,61 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     dischargeWh = pulp.LpVariable.dicts("discharge", range(nrIntervals), lowBound=0, upBound=maxDischargeSpeed/intervalsPerHour(hourAvgPlanning))
     socFloorWh=int(float(minBatterySOCPct/100*ratedBatteryCapacity))
     sockWh = pulp.LpVariable.dicts("soc", range(nrIntervals), lowBound=socFloorWh, upBound=ratedBatteryCapacity)
+    #
+    # THE WINDOW OPENS IN THE PAST. plan-now.sh passes BT_STARTHOUR=$hour, so a run at 10:35
+    # plans from 10:00 - three quarter-hour intervals that have already happened by the time
+    # the plan is written, and more by the time the dispatcher reads it. Left alone the LP
+    # spends them: they are ordinary intervals to it, frequently the cheapest ones in the
+    # climb-back, and energy committed there can never be executed. Observed on 2026-08-19,
+    # where run 08:34:59Z put the whole floor-restoring buy at 08:15Z, twenty minutes dead,
+    # and the battery sat at 5.6% against a 10% floor all morning while every plan since
+    # 02:05Z reported soc_wh flat at exactly the floor. The plan was internally consistent
+    # and unexecutable, which is the failure mode nothing downstream can detect - the
+    # dispatcher correctly followed a plan that had already spent its opportunity.
+    #
+    # An interval counts as actionable only if it has not STARTED. The one in progress is
+    # excluded deliberately: the LP sizes a full interval's energy, and the dispatcher may
+    # inherit seconds of it, so committing to it is how the battery ends up short of a
+    # target the plan believes it reached. Costs at most one interval of latency.
+    if planningNowUtc is None:
+        planningNowUtc=utcNow()
+    firstActionable=nrIntervals
+    for t in range(nrIntervals):
+        if _intervalStartUtc(priceList[t])>=planningNowUtc:
+            firstActionable=t
+            break
+    # A window lying entirely in the past is a BACKTEST (or a unit test), not a live run that
+    # started late, and there "nothing may be dispatched" would zero the whole plan. Falling
+    # back to 0 elapsed intervals keeps that path exactly as it was.
+    elapsedIntervals=firstActionable if firstActionable<nrIntervals else 0
+    for t in range(elapsedIntervals):
+        prob += chargeWh[t]==0
+        prob += dischargeWh[t]==0
+    if elapsedIntervals and (outputMode or debug):
+        print("%d interval(s) of this window already started before %s UTC; no charge or "
+              "discharge planned there"%(elapsedIntervals,planningNowUtc.strftime('%Y-%m-%d %H:%M')))
+
     # The minimum-SOC rule is a rule for the plan, not a description of the battery. If the
-    # battery is ACTUALLY below the floor when planning starts, applying the floor to the
-    # first interval too makes the whole problem infeasible and the planner emits nothing -
-    # exactly when a plan is most needed. Let interval 0 accept reality; every later
-    # interval keeps the floor, so the plan climbs back at the first opportunity.
+    # battery is ACTUALLY below the floor when planning starts, applying the floor to every
+    # interval makes the whole problem infeasible and the planner emits nothing - exactly
+    # when a plan is most needed.
+    #
+    # RELAXED FOR AS LONG AS THE CLIMB PHYSICALLY TAKES, not for one interval. The elapsed
+    # intervals cannot charge at all now, and the battery cannot cross the floor faster than
+    # maxChargeSpeed allows: from 1562 Wh with a 2790 Wh floor that is two quarter-hours at
+    # 4850 W, not one. Relaxing only the first would leave the LP a target it cannot reach
+    # and hand back the infeasibility this block exists to prevent.
     if nrIntervals>0 and initialCharge is not None and int(initialCharge)<socFloorWh:
-        sockWh[0].lowBound=int(initialCharge)
+        chargePerInterval=Effcharge*maxChargeSpeed/intervalsPerHour(hourAvgPlanning)
+        climbIntervals=math.ceil((socFloorWh-int(initialCharge))/chargePerInterval) if chargePerInterval>0 else 1
+        relaxThrough=min(nrIntervals,elapsedIntervals+max(1,climbIntervals))
+        for t in range(relaxThrough):
+            sockWh[t].lowBound=int(initialCharge)
         if outputMode or debug:
-            print("initial charge %d Wh is below the %d%% floor (%d Wh); relaxing the floor for "
-                  "the first interval only"%(int(initialCharge),minBatterySOCPct,socFloorWh))
+            print("initial charge %d Wh is below the %d%% floor (%d Wh); relaxing the floor "
+                  "through interval %d (%d elapsed + %d to climb at %d W)"%(
+                  int(initialCharge),minBatterySOCPct,socFloorWh,relaxThrough-1,
+                  elapsedIntervals,max(1,climbIntervals),maxChargeSpeed))
     # Grid connection limit. maxChargeSpeed bounds the battery; this bounds the meter, and
     # the two are different numbers because the house load rides on the same fuse. Expressed
     # per interval like the charge caps below: a Watt limit is Wh/interval only when the
