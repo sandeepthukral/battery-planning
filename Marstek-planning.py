@@ -2193,6 +2193,36 @@ def _rowsToOutput(runDate,startDateObject,endDateObject,priceList,schedule):
             if (priceList[nr][IDX_TIME_LOCAL][0:10]==runDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])>="15")
             or (priceList[nr][IDX_TIME_LOCAL][0:10]==nextDateString and str(priceList[nr][IDX_TIME_LOCAL][11:13])<"15")]
 
+def refusePublishIfNotOptimal(optimisationStatus,runDate):
+    """Stop a non-Optimal solve from reaching InfluxDB. Live runs only.
+
+    CBC returns a schedule whatever happens, and outside "Optimal" the numbers in it are
+    not a worse plan - they are not a plan. Infeasible leaves the variables wherever the
+    solver abandoned them, Undefined means it never got far enough to have an opinion.
+
+    outputOptimisationResult() already prints an ATTENTION line for this, but it prints it
+    INTO THE OUTPUT FILE, which nobody reads on a scheduled run, and the publish happened
+    regardless. So the dispatcher would command against solver debris with every monitor
+    green - the same shape as the 2026-08-19 failure, where a plan nothing could distinguish
+    from a healthy one was the thing being followed.
+
+    Refusing is safe because staleness is already handled downstream: dispatch keeps using
+    the previous plan and, if no fresh one arrives, MAX_PLAN_AGE expires it and the inverter
+    reverts to self-consumption. That is the designed fail-safe. Publishing nonsense bypasses
+    it entirely, because a garbage plan looks perfectly fresh.
+
+    Exits rather than returning a flag, matching the SOC and midnight-race refusals in
+    _resolveInitialCharge(): plan-now.sh reports the exit code, so the DSM task log says the
+    run failed instead of reporting success over a plan that was never written.
+    """
+    if optimisationStatus=="Optimal":
+        return
+    print("ERROR: the optimiser returned %s (not Optimal) for %s. Refusing to publish this "
+          "plan - the dispatcher will keep the previous one until it ages out, which is the "
+          "designed fail-safe."%(optimisationStatus,datetime.strftime(runDate,'%Y-%m-%d')))
+    raise SystemExit(7)
+
+
 def outputOptimisationResult(optimisationStatus,schedule,outputFileName,writeMode):
     # output to a file. `with`, not a bare open()/close() (CODE-REVIEW.md D8) - an
     # exception mid-write used to leave the handle open and the file truncated.
@@ -2559,6 +2589,7 @@ def main():
         # Live runs only. The loop below walks a date range, so a backtest would otherwise
         # write hundreds of replayed days into the bucket under one plan_run stamp.
         if runDate.date()==today:
+            refusePublishIfNotOptimal(result,runDate)
             writePlanToInflux(schedule,planRunStamp)
         # prepare for next day run
         runDate=runDate+timedelta(days=1)

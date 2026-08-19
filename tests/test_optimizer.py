@@ -244,3 +244,22 @@ def test_a_fully_historical_window_is_untouched(planner):
         **COMMON)
     assert status == "Optimal"
     assert sum(r["charge"] for r in schedule) > 0
+
+
+# --- Publishing guard ---------------------------------------------------------------
+
+def test_an_optimal_solve_publishes(planner):
+    """The normal path has to stay silent and non-blocking, or the guard below would take
+    the planner off the air every run."""
+    planner.refusePublishIfNotOptimal("Optimal", planner.datetime(2026, 8, 19))
+
+
+@pytest.mark.parametrize("status", ["Infeasible", "Unbounded", "Undefined", "Not Solved"])
+def test_a_non_optimal_solve_is_never_published(planner, status):
+    """CBC returns a schedule whatever happens, and outside Optimal its numbers are solver
+    debris rather than a worse plan. Publishing them would have the dispatcher commanding
+    against garbage that looks perfectly fresh downstream - staleness is guarded, nonsense
+    is not."""
+    with pytest.raises(SystemExit) as excinfo:
+        planner.refusePublishIfNotOptimal(status, planner.datetime(2026, 8, 19))
+    assert excinfo.value.code == 7, "plan-now.sh reports this code; the DSM log needs it"
