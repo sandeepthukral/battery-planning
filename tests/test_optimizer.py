@@ -188,3 +188,59 @@ def test_quarter_hour_charge_capped_at_a_quarter_of_the_hourly_rate(planner):
     assert status == "Optimal"
     assert schedule[0]["charge"] <= 4850 / 4 + 1   # +1: integer rounding in the schedule dict
     assert schedule[0]["charge"] > 4850 / 8        # sanity: actually charged near the cap, not near 0
+
+
+# --- Windows that open in the past -------------------------------------------------
+#
+# plan-now.sh passes BT_STARTHOUR=$hour, so a live run at 10:35 plans from 10:00 and the
+# first intervals of every window have already happened. These pass planningNowUtc
+# explicitly rather than leaning on the wall clock, so they assert the rule instead of
+# the date the suite happens to run on.
+
+def _dt(seq):
+    return "2026-01-01 %02d:00" % seq
+
+
+def test_elapsed_intervals_are_never_dispatched(planner):
+    """Energy committed to an interval that has already started cannot be executed -
+    the dispatcher will never see it. The cheapest hour in this window is interval 0,
+    which is exactly the one the optimiser must refuse to use."""
+    priceList = [_row(0, 0.05, 0.05, load=500)] + [
+        _row(t, 0.40, 0.40, load=500) for t in range(1, 6)]
+    status, schedule = planner.LPoptimization(
+        priceList=priceList, initialCharge=14000,
+        planningNowUtc=planner.datetime.strptime(_dt(2), '%Y-%m-%d %H:%M'), **COMMON)
+    assert status == "Optimal"
+    assert all(schedule[t]["charge"] == 0 and schedule[t]["discharge"] == 0
+               for t in (0, 1)), "planned dispatch into an interval that already started"
+
+
+def test_climb_back_to_floor_lands_in_an_actionable_interval(planner):
+    """Below the floor with a window that opened in the past: the recovery buy must be
+    planned where the dispatcher can still act on it, not in the elapsed intervals.
+
+    This is the 2026-08-19 failure in miniature - the plan reported the floor as
+    satisfied while the battery sat below it, because the climb-back had been spent
+    on intervals that were already over when the plan was published."""
+    priceList = [_flatPriceRow(t, 0.20, load=500) for t in range(6)]
+    floorWh = int(0.10 * 27900)
+    status, schedule = planner.LPoptimization(
+        priceList=priceList, initialCharge=1000,
+        planningNowUtc=planner.datetime.strptime(_dt(2), '%Y-%m-%d %H:%M'), **COMMON)
+    assert status == "Optimal"
+    assert all(schedule[t]["charge"] == 0 for t in (0, 1))
+    assert sum(schedule[t]["charge"] for t in range(2, 6)) > 0, "never climbs back"
+    assert schedule[-1]["soc"] >= floorWh, "plan ends below the floor it claims to hold"
+
+
+def test_a_fully_historical_window_is_untouched(planner):
+    """A backtest plans a window that is entirely in the past. Treating those intervals
+    as un-dispatchable would zero the whole plan, so the elapsed-interval rule must not
+    fire at all - the floor still relaxes for the climb, exactly as before."""
+    priceList = [_flatPriceRow(t, 0.20, load=500) for t in range(6)]
+    status, schedule = planner.LPoptimization(
+        priceList=priceList, initialCharge=1000,
+        planningNowUtc=planner.datetime.strptime("2030-01-01 00:00", '%Y-%m-%d %H:%M'),
+        **COMMON)
+    assert status == "Optimal"
+    assert sum(r["charge"] for r in schedule) > 0
