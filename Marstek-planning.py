@@ -124,7 +124,37 @@ import hardware
 ratedBatteryCapacity=hardware.CAPACITY_WH      # Wh, AlphaESS - see hardware.py (CODE-REVIEW.md D4):
                                                 # advise.py and report_day.py read the same constant
 maxChargeSpeed=4850             # W, measured p99 - see above before changing
-maxDischargeSpeed=4700          # W, measured p99
+maxDischargeSpeed=4700          # W, measured p99. This is the ACHIEVABLE ceiling - what the
+                                 # battery actually delivers - and stays the bound for every
+                                 # Wh/SoC/reserve/cost calculation in LPoptimization(). Do not
+                                 # confuse it with maxRequestedDischargeSpeed below.
+#
+# THE SETPOINT SENT TO THE INVERTER IS NOT THE SAME NUMBER AS WHAT IT DELIVERS.
+#
+# Investigated 2026-08-24 chasing a commanded-4700W/achieved-4400W discharge gap. A manual
+# full-discharge from the AlphaESS app requested -5000 W (Mode 2, past nameplate) and settled
+# at ~4700 W - the SAME ~300 W (~6%) regulation floor dispatch's own -4700 W command loses,
+# just overshot on purpose. It is not a dispatch bug and not app-vs-dispatch asymmetry: the
+# inverter appears to hold back a roughly constant ~300 W on sustained discharge regardless of
+# what is asked for, so hitting the true 4700 W ceiling requires asking for ~5000 W.
+#
+# maxDischargeSpeed above must stay the true achievable figure - report_day.py's
+# `planDischarge` and any dashboard reading discharge_wh from the `planning` bucket depend on
+# it being real, physical energy, and LPoptimization()'s own SoC/reserve/cost math would drift
+# from reality if it planned against a number the battery cannot actually move. So the boosted
+# setpoint is injected only at the very last step, into a SEPARATE field
+# (`discharge_power_w`, see LPoptimization()'s schedule loop and writePlanToInflux()) that
+# `dispatch/translator.py` in alphaess-collector prefers over the derived wh-based power when
+# present, and ONLY for intervals already planned at the maxDischargeSpeed ceiling - a partial
+# discharge is left untouched, since undercorrecting there is a rare, small (~10%), short
+# (<=15 min) error not worth the same treatment.
+#
+# Charge is NOT split this way (yet): the same investigation found charge sessions already
+# meet or slightly exceed their setpoint (commanded 4850 -> measured up to 4966), so there is
+# no measured shortfall to compensate for. Revisit only if that changes.
+maxRequestedDischargeSpeed=5000 # W, the setpoint written to the inverter for a slot planned
+                                 # at maxDischargeSpeed, chosen to match what the AlphaESS
+                                 # app's own full-discharge command uses.
 # 6800 EUR all-in / (6000 cycles x 27.9 kWh x 90% DoD) = 0.0451 EUR per kWh discharged.
 # Assumes the 6000-cycle warranty is the life and charges the whole install against
 # throughput, so it errs high. Inherited default was 0.052, derived for the 2.1 kWh Marstek.
@@ -1946,7 +1976,8 @@ def _intervalStartUtc(interval):
 
 
 def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None,
-                    maxChargeSpeed=None, maxDischargeSpeed=None, minBatterySOCPct=None,
+                    maxChargeSpeed=None, maxDischargeSpeed=None,
+                    maxRequestedDischargeSpeed=None, minBatterySOCPct=None,
                     onewayEff=None, cycleCosts=None, hourAvgPlanning=None,
                     gridConnectionLimit=None, gridLimitAppliesToExport=None,
                     zeroGridCharge=None, terminalReserveWh=None,
@@ -1965,6 +1996,7 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     ratedBatteryCapacity = _fallback("ratedBatteryCapacity", ratedBatteryCapacity)
     maxChargeSpeed = _fallback("maxChargeSpeed", maxChargeSpeed)
     maxDischargeSpeed = _fallback("maxDischargeSpeed", maxDischargeSpeed)
+    maxRequestedDischargeSpeed = _fallback("maxRequestedDischargeSpeed", maxRequestedDischargeSpeed)
     minBatterySOCPct = _fallback("minBatterySOCPct", minBatterySOCPct)
     onewayEff = _fallback("onewayEff", onewayEff)
     cycleCosts = _fallback("cycleCosts", cycleCosts)
@@ -2147,12 +2179,27 @@ def LPoptimization(priceList=None, initialCharge=None, ratedBatteryCapacity=None
     optimisationStatus=pulp.LpStatus[prob.status]
 
     # OUTPUT, put the variables for each interval onto a list called "schedule"
+    #
+    # dischargeCeilingWh is dischargeWh[t]'s OWN upBound (declared above), recomputed rather
+    # than stored per-interval because it does not vary across t - see intervalsPerHour()'s
+    # CODE-REVIEW.md D2 note on why that division is not repeated ad hoc elsewhere.
+    dischargeCeilingWh = maxDischargeSpeed / intervalsPerHour(hourAvgPlanning)
     schedule = []
     for t in range(nrIntervals):
+        # A solved LP variable sitting AT its own upBound rarely lands on it exactly (solver
+        # tolerance), so this compares the raw value, not the truncated "discharge" int below,
+        # against the bound with a small margin - not against the request being merely close
+        # to the ceiling, which a differently-sized interval could satisfy by coincidence.
+        atCeiling = dischargeWh[t].value() >= dischargeCeilingWh - 1e-3
         schedule.append({
             "interval": t,
             "charge": int(chargeWh[t].value()),
             "discharge": int(dischargeWh[t].value()),
+            # The setpoint dispatch/translator.py should put on the wire for this interval,
+            # instead of deriving one from "discharge" - see maxRequestedDischargeSpeed's
+            # comment above. None (omitted on the wire, per influx_source.linePoint) for
+            # every interval NOT planned at the discharge ceiling.
+            "discharge_power_w": maxRequestedDischargeSpeed if atCeiling else None,
             "soc": int(sockWh[t].value()),
             "import": int(importWh[t].value()),
             "export": int(exportWh[t].value()),
@@ -2319,6 +2366,10 @@ def writePlanToInflux(schedule,planRun):
              "capacity_wh":ratedBatteryCapacity,
              "charge_wh":record["charge"],
              "discharge_wh":record["discharge"],
+             # Wire-setpoint override for a slot planned at the discharge ceiling - see
+             # maxRequestedDischargeSpeed's comment. Omitted (None) on every other slot, so
+             # dispatch/translator.py's fallback to discharge_wh applies unchanged.
+             "discharge_power_w":record.get("discharge_power_w"),
              "import_wh":record["import"],
              "export_wh":record["export"],
              "cost_eur":record["costs"],

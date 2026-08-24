@@ -26,6 +26,7 @@ def _flatPriceRow(seq, price, load=0):
 
 COMMON = dict(
     ratedBatteryCapacity=27900, maxChargeSpeed=4850, maxDischargeSpeed=4700,
+    maxRequestedDischargeSpeed=5000,
     minBatterySOCPct=10, onewayEff=0.9487, cycleCosts=0.0451,
     hourAvgPlanning=True, gridConnectionLimit=8050, gridLimitAppliesToExport=True,
     zeroGridCharge=False, terminalReserveWh=0,   # 0, not None: opt out of calcTerminalReserveWh
@@ -93,6 +94,52 @@ def test_without_reserve_it_sells_down_to_the_floor(planner):
     assert status == "Optimal"
     floorWh = int(0.10 * 27900)
     assert schedule[-1]["soc"] <= floorWh + 1   # +1: integer rounding in the schedule dict
+
+
+def test_discharge_at_ceiling_gets_the_wire_override(planner):
+    """maxRequestedDischargeSpeed's whole point: an interval discharging at the
+    achievable ceiling (maxDischargeSpeed) gets a boosted discharge_power_w for
+    dispatch to put on the wire; an interval discharging LESS than the ceiling -
+    whatever is left once the battery nears the floor - must not.
+
+    Same setup as test_without_reserve_it_sells_down_to_the_floor (4 dear intervals,
+    initialCharge=14000, no reserve): flat-priced dear intervals give the solver no
+    preference between them, so it fills two at the full 4700 Wh ceiling, sells the
+    leftover in a third below the ceiling, and has nothing left for the fourth --
+    every combination the override logic needs to prove itself against, in one solve.
+    """
+    priceList = [_row(t, 0.40, 0.40, load=0) for t in range(4)]
+    status, schedule = planner.LPoptimization(
+        priceList=priceList, initialCharge=14000, **COMMON)
+    assert status == "Optimal"
+    for r in schedule:
+        if r["discharge"] == 4700:
+            assert r["discharge_power_w"] == 5000, \
+                f"interval {r['interval']}: at the ceiling but no wire override"
+        else:
+            assert r["discharge_power_w"] is None, \
+                f"interval {r['interval']}: below the ceiling but override set anyway"
+    at_ceiling = [r["interval"] for r in schedule if r["discharge_power_w"] == 5000]
+    below_ceiling = [r["interval"] for r in schedule
+                     if 0 < r["discharge"] < 4700 and r["discharge_power_w"] is None]
+    assert at_ceiling, "test assumes at least one interval hits the ceiling"
+    assert below_ceiling, "test assumes at least one interval discharges below the ceiling"
+
+
+def test_discharge_ceiling_override_does_not_apply_to_charge(planner):
+    """charge_wh has no analogous override field - maxRequestedDischargeSpeed is
+    discharge-only (see its comment in Marstek-planning.py: charge already meets or
+    exceeds its setpoint, so there is nothing to compensate for)."""
+    priceList = [
+        _row(0, 0.05, 0.05, load=0),   # cheap: charges at the ceiling
+        _row(1, 0.40, 0.40, load=0),   # dear
+    ]
+    status, schedule = planner.LPoptimization(
+        priceList=priceList, initialCharge=2800, **COMMON)
+    assert status == "Optimal"
+    assert schedule[0]["charge"] == 4850   # at ITS OWN ceiling, maxChargeSpeed
+    assert "charge_power_w" not in schedule[0]
+    assert schedule[0]["discharge_power_w"] is None
 
 
 def test_initial_charge_below_floor_still_solves(planner):
