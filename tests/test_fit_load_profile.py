@@ -35,7 +35,7 @@ def _row(hour, forecast, actual, dayOffset=0):
 
 
 def _runStamp(when):
-    """A plan_run tag as Marstek-planning.py:2358 writes it: UTC, ISO 8601, Z-suffixed.
+    """A plan_run tag as planner.py:2358 writes it: UTC, ISO 8601, Z-suffixed.
 
     Built by converting rather than by formatting the local time with a Z on the end. That
     shortcut stamps a summer run two hours late, which puts every plan out of force and makes

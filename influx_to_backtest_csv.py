@@ -6,7 +6,7 @@ recent days the alphaess-collector InfluxDB is a better source: 30s samples rath
 than portal hourly buckets, so none of the catch-up-spike misattribution that
 clean_backtest_csv.py has to repair.
 
-Writes the same three columns Marstek-planning.py expects:
+Writes the same three columns planner.py expects:
 
     datetime,load_kwh,solar_kwh      (datetime is Europe/Amsterdam, hour start)
 

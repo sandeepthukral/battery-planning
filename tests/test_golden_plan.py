@@ -1,11 +1,11 @@
-"""Golden-file characterisation tests for Marstek-planning.py.
+"""Golden-file characterisation tests for planner.py.
 
 These do not assert the plan is CORRECT. They assert it is UNCHANGED. That is
 deliberate: the planner's ~2,200 lines are refactor targets (see CODE-REVIEW.md,
 stages 2-3), and the only cheap way to know a refactor hasn't silently changed a
 number is to diff its output against a frozen-in-time reference.
 
-Each scenario runs the real CLI entry point (`python3 Marstek-planning.py -s -p -u -b`)
+Each scenario runs the real CLI entry point (`python3 planner.py -s -p -u -b`)
 against frozen fixtures - a copied EnergyZero price-cache response (market prices, not
 household data) and a synthetic load/PV CSV (invented numbers, not the real backtest
 CSV, which is gitignored occupancy data - see .gitignore's "Household load/solar
@@ -31,7 +31,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-PLANNER = os.path.join(REPO, "Marstek-planning.py")
+PLANNER = os.path.join(REPO, "planner.py")
 FIXTURES = os.path.join(HERE, "fixtures")
 
 # Prefer the checked-in .venv's interpreter (has pulp/requests installed);

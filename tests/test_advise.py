@@ -74,4 +74,4 @@ def test_min_hours_with_non_numeric_value_fails_cleanly(tmp_path):
 def test_no_arguments_prints_docstring_and_exits_2():
     result = _run([])
     assert result.returncode == 2
-    assert "Turn a Marstek-planning.py plan table" in result.stdout
+    assert "Turn a planner.py plan table" in result.stdout

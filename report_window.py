@@ -40,8 +40,8 @@ import influx_source as ix
 import report_day
 from report_day import CAPACITY_WH, PLAN_MEASUREMENT
 
-# The optimiser's own efficiency, derived the same way Marstek-planning.py:545 derives it, so
-# a changed RTE moves both together. The SoC recursion (Marstek-planning.py:2006-2008) debits
+# The optimiser's own efficiency, derived the same way planner.py:545 derives it, so
+# a changed RTE moves both together. The SoC recursion (planner.py:2006-2008) debits
 # discharge/onewayEff and credits onewayEff*charge, which is what this file holds the measured
 # battery against.
 RTE = float(os.environ.get("BT_RTE", "85"))
@@ -59,7 +59,7 @@ def attribute(rows):
     drift is a difference between two points and does not exist for one.
 
     The split is exact rather than approximate, which is the point. The optimiser's
-    recursion (Marstek-planning.py:2006-2008) is
+    recursion (planner.py:2006-2008) is
 
         planDrop = planDischarge/eff - eff*planCharge - planPv
 

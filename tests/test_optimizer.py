@@ -5,15 +5,15 @@ parameters (defaulting to the module globals the live path still uses), so a tes
 can hand it a small hand-built priceList and assert on the schedule directly instead
 of driving the whole CLI through a fixture.
 
-Row shape, matching Marstek-planning.py's own priceList convention:
+Row shape, matching planner.py's own priceList convention:
     [seqNr, price_kwh, utc_str, local_str, pvDirect, pvIndirect, load, priceBuy, priceSell]
 Indices 4-8 are the ones LPoptimization() reads (forecastDirectIndex .. sellPriceIndex).
 This installation has no direct-coupled group, so pvDirect (index 4) is always 0 - see
-the pvGroups comment block at the top of Marstek-planning.py.
+the pvGroups comment block at the top of planner.py.
 """
 import pytest
 
-# `planner` fixture (loads Marstek-planning.py fresh per test) comes from conftest.py.
+# `planner` fixture (loads planner.py fresh per test) comes from conftest.py.
 
 
 def _row(seq, priceBuy, priceSell, pvIndirect=0, load=0, localTime="2026-01-01 %02d:00" % 0):
@@ -128,7 +128,7 @@ def test_discharge_at_ceiling_gets_the_wire_override(planner):
 
 def test_discharge_ceiling_override_does_not_apply_to_charge(planner):
     """charge_wh has no analogous override field - maxRequestedDischargeSpeed is
-    discharge-only (see its comment in Marstek-planning.py: charge already meets or
+    discharge-only (see its comment in planner.py: charge already meets or
     exceeds its setpoint, so there is nothing to compensate for)."""
     priceList = [
         _row(0, 0.05, 0.05, load=0),   # cheap: charges at the ceiling

@@ -15,5 +15,5 @@ pulp==3.3.2
 # Not imported by name anywhere - it is the data behind zoneinfo. python:3.12-slim has no
 # system tzdata, so ZoneInfo("Europe/Amsterdam") raises ZoneInfoNotFoundError without it.
 # Every date and hour in this program is Amsterdam wall-clock; see the "Wall clock" block in
-# Marstek-planning.py for why UTC would silently shorten the 14:05 run's horizon.
+# planner.py for why UTC would silently shorten the 14:05 run's horizon.
 tzdata==2026.3

@@ -149,6 +149,6 @@ def test_the_first_interval_contributes_no_energy():
 
 
 def test_oneway_eff_follows_the_planners_own_rte_derivation():
-    """Same expression as Marstek-planning.py:545. If one moves and the other does not, this
+    """Same expression as planner.py:545. If one moves and the other does not, this
     report silently starts measuring the drift against an efficiency the plan never used."""
     assert abs(rw.ONEWAY_EFF - (100.0 - (100.0 - rw.RTE) / 2.0) / 100.0) < 1e-12

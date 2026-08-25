@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a Marstek-planning.py plan table into instructions a person can act on.
+"""Turn a planner.py plan table into instructions a person can act on.
 
 The planner emits one row per interval with charge/discharge/import/export in Wh. That is
 the right shape for an optimiser and the wrong shape for a human: nobody wants 104 rows of

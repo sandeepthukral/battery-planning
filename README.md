@@ -5,17 +5,19 @@ Plan and optimise battery charging/discharging for maximised profit using hourly
 
 It takes a linear programming optimisation approach for all intervals (15-min or hour) with a known price, so normally until 24:00 today or tomorrow (if tomorrows prices are already known, normally after 13:00).
 
-The program is now designed to drive a Marstek battery, but can easily be adapted to drive other batteries, or run standalone without interface.
+This installation is an AlphaESS battery (27.9 kWh) with 4.98 kWp of AC-coupled solar, on a Dutch dynamic-price contract, reading live state from the InfluxDB that `alphaess-collector` fills. It is **advisory only**: every run produces a plan and stores it, and nothing is ever sent to the battery. The hardware control paths that once drove a Marstek battery are either dormant (Domoticz, present but switched off) or removed (the Marstek MQTT cloud path).
+
+Originally forked from [WillemD61/battery-planning](https://github.com/WillemD61/battery-planning), which targets Marstek hardware via Domoticz. This copy has diverged substantially and is developed independently; if you own a Marstek battery, the upstream project is the one you want.
 
 # Scripts at a glance
 
-`Marstek-planning.py` is the core optimiser and can be run directly, but day to day it is driven
+`planner.py` is the core optimiser and can be run directly, but day to day it is driven
 by a handful of wrapper scripts. Two independent paths exist — a live path that plans for right
 now, and a backtest path that replays historical data:
 
 | Script | Purpose |
 |---|---|
-| `Marstek-planning.py` | The LP optimiser itself. Reads prices/PV/usage/SOC, writes a plan table (`entsoe-output<date>.txt`). See "Program internal logic" below and `docs/PLAN.md` for the output format. |
+| `planner.py` | The LP optimiser itself. Reads prices/PV/usage/SOC, writes a plan table (`entsoe-output<date>.txt`). See "Program internal logic" below and `docs/PLAN.md` for the output format. |
 | `plan-now.sh` | **Live path.** Runs the planner for the current moment (real SOC from InfluxDB, today+tomorrow's prices, fresh PV forecast), saves the plan to `plans/plan_<date>_<hour>.txt`, and runs `advise.py` as a sanity check. Advisory only — nothing is sent to the battery. |
 | `scripts/plan.sh` | **What the NAS actually runs.** The host-side DSM Task Scheduler entry, hourly at :55 — five minutes *before* the hour it plans for, see the script's own header for why: one `plan-now.sh` pass in the container, then `capture_weather.py` non-fatally beside it. Lives outside the image on purpose — it is what starts the container, so it cannot be inside it. |
 | `scripts/report.sh` | The second DSM task, daily at 06:10: `report_day.py --write` for yesterday. Deliberately separate from `plan.sh` so a planning failure cannot take the report down with it. |
@@ -29,18 +31,18 @@ now, and a backtest path that replays historical data:
 | `weather_source.py` | Shared Open-Meteo client behind those two. Explains in its docstring why not KNMI (a two-day lag), why UTC (October has two 02:00s), and why the archive and forecast endpoints are not interchangeable. |
 | `solar-forecast.sh` | Runs `plan-now.sh` and prints just the forecast PV generation (Wh) for today, by hour. |
 | `influx_source.py` | Shared data-access module for the InfluxDB instance fed by `alphaess-collector` — battery SOC and recent hourly load/PV. This is the live data source; run `python3 influx_source.py` on its own as a connectivity self-test. |
-| `hardware.py` | The battery capacity in Wh, in one place. `Marstek-planning.py`, `advise.py` and `report_day.py` all import it, so a capacity change is a one-file edit. |
+| `hardware.py` | The battery capacity in Wh, in one place. `planner.py`, `advise.py` and `report_day.py` all import it, so a capacity change is a one-file edit. |
 | `soc_curve.py` | The measured non-linear Wh-per-SoC-point curve, with `scripts/fit_soc_curve.py` to refit it from InfluxDB. **Nothing imports it yet** — the planner still uses `hardware.py`'s flat constant. Kept as fitted-and-parked work; see `TODO.md`. |
-| `solar.py` | Sun-elevation (NOAA approximation) and elevation-curve interpolation, in one place. Imported by `Marstek-planning.py`, `fit_pv_elevation.py` and `clean_backtest_csv.py`. |
-| `http_config.py` | The outbound HTTP timeout policy (connect/read seconds), shared by `Marstek-planning.py` and `influx_source.py`. |
+| `solar.py` | Sun-elevation (NOAA approximation) and elevation-curve interpolation, in one place. Imported by `planner.py`, `fit_pv_elevation.py` and `clean_backtest_csv.py`. |
+| `http_config.py` | The outbound HTTP timeout policy (connect/read seconds), shared by `planner.py` and `influx_source.py`. |
 | `clean_backtest_csv.py` | Repairs the raw APsystems EMA hourly export (redistributes outage catch-up spikes, drops zero-load days) before it's used as backtest input. |
 | `influx_to_backtest_csv.py` | Exports recent measured load/PV from InfluxDB into the same CSV shape the backtester expects — a higher-fidelity alternative for recent days. |
 | `p1_to_backtest_csv.py` | Builds a backtest CSV from the Sparky P1 smart-meter export (pre-battery-installation period only, using the load = solar + delivery − return identity). |
 | `run-matrix.sh` | **Backtest path.** Drives the planner across an 8-run matrix (power limit × saldering × real-vs-no-battery) over a fixed historical year, to isolate what the battery itself is worth. Needs a CSV built by one of the three scripts above. |
 
-Live path: `solar-forecast.sh` → `plan-now.sh` → `Marstek-planning.py` → `advise.py`, with
+Live path: `solar-forecast.sh` → `plan-now.sh` → `planner.py` → `advise.py`, with
 `report_day.py` closing the loop the next day.
-Backtest path: `clean_backtest_csv.py` / `influx_to_backtest_csv.py` / `p1_to_backtest_csv.py` → `run-matrix.sh` → `Marstek-planning.py` (run 8×).
+Backtest path: `clean_backtest_csv.py` / `influx_to_backtest_csv.py` / `p1_to_backtest_csv.py` → `run-matrix.sh` → `planner.py` (run 8×).
 
 Deeper detail lives in `docs/PLAN.md` (plan file column format) and `NAS-DEPLOYMENT-PLAN.md` (moving the live path onto always-on hardware). `TODO.md` is what is left to do, split into work, things waiting on time, and things deferred on purpose.
 
@@ -62,13 +64,13 @@ It is a python program that is started from a command line with various command 
 Most of what varies run to run (dates, battery capacity/speed overrides, SOC, price cache
 locations, backtest input, terminal reserve behaviour, ...) is controlled by `BT_*` environment
 variables rather than command-line flags — see "Environment variables" below. `plan-now.sh` and
-`run-matrix.sh` set these for you; run `Marstek-planning.py` directly only for a one-off or
+`run-matrix.sh` set these for you; run `planner.py` directly only for a one-off or
 interactive session.
 
 It can for example be scheduled from cron, from domoticz or run manually. It is specifically designed to run at the start of each price interval (for example hour) to set the battery mode for the coming interval, but taking into accouunt all know future prices etc. 
 
 As an example, I currently use it with the following line in the crontab:
-0 * * * * /usr/bin/python3 /home/pi/hame-relay/Marstek-planning.py -d -p -u -n -b -h >> /home/pi/hame-relay/batteryplanning.log 2>&1
+0 * * * * /usr/bin/python3 /home/pi/hame-relay/planner.py -d -p -u -n -b -h >> /home/pi/hame-relay/batteryplanning.log 2>&1
 
 The standalone mode will interactively request user input and provide feedback on the screen and in a file. The Domoticz mode will take the input from Domoticz variables and devices, load the planning onto a Domoticz text device for display and trigger the next action from the planning and send it to the battery. The standalone mode will only produce a planning (into a file) and not trigger any action.
 
@@ -92,14 +94,14 @@ For the past it can also include actual PV production and actual usage, via `BAC
 * `influx_to_backtest_csv.py` — exports recent measured load/PV straight from InfluxDB for a `start_date end_date` range, in the same CSV shape. Higher fidelity (30s-sampled) than the EMA export for the days InfluxDB actually covers.
 * `p1_to_backtest_csv.py` — builds a CSV from the Sparky P1 smart-meter export using the identity `load = solar + delivery - return`, valid only for the period before the battery was installed (`--until`, default the day before commissioning).
 
-Once a CSV exists, `run-matrix.sh` drives `Marstek-planning.py -s -p -u -b -h` across an 8-run
+Once a CSV exists, `run-matrix.sh` drives `planner.py -s -p -u -b -h` across an 8-run
 matrix (grid power limit × saldering on/off × real battery vs. ~0 baseline) over a fixed
 historical year, and writes `results/summary.tsv` — the comparison against the no-battery
 baseline is what isolates the battery's own contribution from the tariff/PV/usage backdrop.
 
 # Domoticz integration mode (legacy, disabled by default)
 
-The program can take input from Domoticz variables and devices and trigger output onto Domoticz devices — this was the original design. It is now off by default (`useDomoticz=False` near the top of `Marstek-planning.py`): every Domoticz function is still present and unmodified, but the `-d`/`-i` CLI modes refuse to run, and the two remaining call sites that would otherwise reach Domoticz (`getLocation`, `calcHourlyAvgUsage`) are cut. Standalone mode (`-s`, the live path used by `plan-now.sh`) is unaffected either way.
+The program can take input from Domoticz variables and devices and trigger output onto Domoticz devices — this was the original design. It is now off by default (`useDomoticz=False` near the top of `planner.py`): every Domoticz function is still present and unmodified, but the `-d`/`-i` CLI modes refuse to run, and the two remaining call sites that would otherwise reach Domoticz (`getLocation`, `calcHourlyAvgUsage`) are cut. Standalone mode (`-s`, the live path used by `plan-now.sh`) is unaffected either way.
 
 Set `useDomoticz=True` to restore the original behaviour. If you do, the idx numbers for the Domoticz devices will need to be adapted in the program file, as these differ for each operating environment — the first ~190 lines of the program contain all references to the Domoticz installation, the PV panel setup and the Marstek plugin, and need to be read carefully and adapted for your local installation, for example setting up the relevant user variables and adapting the IDX numbers in the python code.
 
@@ -139,7 +141,7 @@ Energyzero will be used of the entsoe data retrieval fails.
 Command-line flags (`-p`, `-u`, `-n`, ...) turn features on and off; `BT_*` environment
 variables set the numbers those features use, and are what let `plan-now.sh` and
 `run-matrix.sh` drive the same program two very different ways without editing code. Anything
-not set here falls back to the constant in the config block at the top of `Marstek-planning.py`.
+not set here falls back to the constant in the config block at the top of `planner.py`.
 
 | Variable | Controls |
 |---|---|

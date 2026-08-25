@@ -1,6 +1,6 @@
 """solar.py: the one shared implementation of solar elevation and curve interpolation
 (CODE-REVIEW.md D5). Before this, the same formula existed separately in
-Marstek-planning.py, fit_pv_elevation.py and clean_backtest_csv.py.
+planner.py, fit_pv_elevation.py and clean_backtest_csv.py.
 """
 import os
 import sys

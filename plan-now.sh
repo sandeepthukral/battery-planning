@@ -23,7 +23,7 @@ set -u
 scriptDir=$(cd "$(dirname "$0")" && pwd)
 cd "${BT_DATA_DIR:-$scriptDir}"
 
-# advise.py imports influx_source without the sys.path guard that Marstek-planning.py has,
+# advise.py imports influx_source without the sys.path guard that planner.py has,
 # so once the CWD is no longer the code directory it needs telling where to look. The
 # container also sets this, harmlessly; here it makes a Mac run with BT_DATA_DIR work too.
 export PYTHONPATH=${PYTHONPATH:-$scriptDir}
@@ -31,12 +31,12 @@ export PYTHONPATH=${PYTHONPATH:-$scriptDir}
 # Pin the wall clock before reading it. Everything here - the plan filename, BT_START,
 # BT_STARTHOUR, the energy-tax year - comes from `date`, which follows TZ. A container
 # defaults to UTC, so without this the 13:55 run would ask the planner to start at hour 11
-# and would write its plan under the wrong hour, while Marstek-planning.py's own clock (see
+# and would write its plan under the wrong hour, while planner.py's own clock (see
 # its "Wall clock" block) correctly said 13. The two must not be allowed to disagree.
 #
 # Keyed off BT_TZ, not TZ, and deliberately so. Defaulting with ${TZ:-...} would let an
 # image that sets TZ=UTC win, which is precisely the case this exists to defend against.
-# BT_TZ is the single knob: Marstek-planning.py reads the same variable for its own clock,
+# BT_TZ is the single knob: planner.py reads the same variable for its own clock,
 # so the shell and the planner cannot end up in different timezones.
 #   TZ=UTC ./plan-now.sh        still plans in Amsterdam time
 #   BT_TZ=UTC ./plan-now.sh     plans in UTC, both halves agreeing
@@ -102,21 +102,21 @@ log=logs/plan_${today}_${hour}.log
 # regime changes by itself on 2027-01-01 with no edit here.
 #
 # Hardware (capacity, charge/discharge ceilings, cycle cost, grid connection limit) is NOT
-# set here. It lives in one constant block at the top of Marstek-planning.py, so the live
+# set here. It lives in one constant block at the top of planner.py, so the live
 # plan, the backtest and an interactive run cannot disagree about what the system is. That
 # block is also where the 10 kW inverter / three-phase upgrade gets made. BT_CAP, BT_MAXCHG,
 # BT_MAXDIS, BT_CYCLECOSTS and BT_GRIDMAX still override here for a one-off what-if:
 #   BT_GRIDMAX=5750 ./plan-now.sh     # what the 3x25A single-phase connection would do
 #
 # stdin from /dev/null is load-bearing, not tidiness. Any variable not set above falls back
-# to the constants in Marstek-planning.py, and _ask() only takes that path when there is no
+# to the constants in planner.py, and _ask() only takes that path when there is no
 # terminal. Run from a shell, stdout goes to the log but stdin is still the terminal, so it
 # would prompt into the log file and wait forever for an answer nobody can see.
 BT_START=$today BT_END=$tomorrow BT_STARTHOUR=$hour \
 BT_INITCHARGE=influx BT_MINSOC=10 BT_RTE=90 \
 BT_ETAX=$etax \
 BT_XMLAVAIL=N BT_OVERWRITE=Y BT_PRICE_CACHE=price_cache \
-  $PY "$scriptDir/Marstek-planning.py" -s -p -u -b < /dev/null >> "$log" 2>&1
+  $PY "$scriptDir/planner.py" -s -p -u -b < /dev/null >> "$log" 2>&1
 rc=$?
 
 if [ "$rc" -ne 0 ]; then
@@ -130,7 +130,7 @@ planOutput=entsoe-output${today}.txt
 if [ ! -f "$planOutput" ]; then
   # The planner exited 0 above but did not write the file this expects under
   # today's date. The known cause is the midnight race between this script's own
-  # `date` and Marstek-planning.py's separate clock (see its "Wall clock" block and
+  # `date` and planner.py's separate clock (see its "Wall clock" block and
   # the BT_INITCHARGE=influx guard, CODE-REVIEW.md C7): the planner refuses in that
   # case, which should have been caught by `rc -ne 0` above, but a mismatch that
   # instead sent it down the HISTORICAL branch writes its output under a DIFFERENT

@@ -1,12 +1,12 @@
 # The plan file
 
-`Marstek-planning.py` writes one plan table per run. This document describes that file: where
+`planner.py` writes one plan table per run. This document describes that file: where
 it comes from, what each column means, and how it is consumed downstream.
 
 ## Where it comes from
 
-`Marstek-planning.py` itself writes to `entsoe-output<startdate>.txt` in the working directory
-(`outputOptimisationResult()`, `Marstek-planning.py:1799`). `plan-now.sh` runs the planner and
+`planner.py` itself writes to `entsoe-output<startdate>.txt` in the working directory
+(`outputOptimisationResult()`, `planner.py:1799`). `plan-now.sh` runs the planner and
 then renames that file to `plans/plan_<YYYYMMDD>_<HH>.txt`, where the date/hour are the run's
 start date and start hour (`plan-now.sh:70-71`):
 
@@ -51,7 +51,7 @@ ATTENTION: no optimal solution achieved, status is <status> on date <runDate>
 |-----------|---------|---------|
 | `date`    | —       | Local calendar date of the interval start |
 | `time`    | —       | Local time of the interval start (`HH:MM`) |
-| `pvD`     | Wh      | Forecast (or actual) PV production from "direct" panel groups — panels DC/MPPT-coupled straight into the battery. This household has none (all panels are AC-coupled/"indirect"), so `pvD` is always `0` here; see the group comment near the top of `Marstek-planning.py`. |
+| `pvD`     | Wh      | Forecast (or actual) PV production from "direct" panel groups — panels DC/MPPT-coupled straight into the battery. This household has none (all panels are AC-coupled/"indirect"), so `pvD` is always `0` here; see the group comment near the top of `planner.py`. |
 | `pvI`     | Wh      | Forecast (or actual) PV production from "indirect" panel groups — AC-coupled into the house consumer unit, competing with usage/export/charging in the grid balance |
 | `use`     | Wh      | Forecast (or actual) household consumption for the interval |
 | `nett`    | Wh      | `use - pvI - pvD`: the interval's net position before any battery/grid action. Positive = shortfall, negative = surplus. |
@@ -67,7 +67,7 @@ ATTENTION: no optimal solution achieved, status is <status> on date <runDate>
 
 Integer columns (`pvD` … `exp`) are printed right-aligned in 5-character fields. `pr-buy` and
 `pr-sell` are signed with 6 decimal places; `cost` is signed with 6 decimal places and a wider
-integer part. See `printIntervalToFile()` (`Marstek-planning.py:1833`) for the exact format
+integer part. See `printIntervalToFile()` (`planner.py:1833`) for the exact format
 strings.
 
 ### Which days get written

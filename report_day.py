@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import influx_source as ix
 import hardware
 
-# BT_CAP still overrides for a backtest/what-if run, same as Marstek-planning.py's own
+# BT_CAP still overrides for a backtest/what-if run, same as planner.py's own
 # getUserInput(); the DEFAULT comes from hardware.py (CODE-REVIEW.md D4) instead of a
 # second hardcoded "27900" that could silently drift from the planner's own constant.
 CAPACITY_WH = float(os.environ.get("BT_CAP", str(hardware.CAPACITY_WH)))

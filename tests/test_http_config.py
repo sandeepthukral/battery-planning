@@ -1,7 +1,7 @@
 """http_config.py is the single source for the outbound HTTP policy - timeouts (E7) and,
 since a DNS blip cost a whole plan run, retries (E9).
 
-Before E7, Marstek-planning.py declared (10, 30) once and influx_source.py separately
+Before E7, planner.py declared (10, 30) once and influx_source.py separately
 hardcoded a bare 30 at its two live call sites.
 """
 import datetime
@@ -25,7 +25,7 @@ def test_influx_source_reads_the_shared_timeout():
     assert ix.http_config.HTTP_TIMEOUT is http_config.HTTP_TIMEOUT
 
 
-def test_marstek_planning_reads_the_shared_timeout(planner):
+def test_planner_reads_the_shared_timeout(planner):
     assert planner.HTTP_TIMEOUT == http_config.HTTP_TIMEOUT
 
 
@@ -123,7 +123,7 @@ def test_the_live_call_sites_all_go_through_the_retry_helper():
     # The three outbound calls on the plan's critical path. Anything left calling
     # requests.get directly still dies on the first hiccup, which is the bug.
     source = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                               "Marstek-planning.py")).read()
+                               "planner.py")).read()
     live = source.split("def loadPVforecastIntoFile")[1]
     assert "requests.get(url,timeout=HTTP_TIMEOUT)" not in live
     assert live.count("http_config.getWithRetries(") == 3
