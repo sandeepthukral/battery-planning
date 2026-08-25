@@ -1,6 +1,7 @@
 # What is left to do
 
-State at the end of 2026-07-30. The planner runs unattended on the NAS every 3 hours, the
+State at the end of 2026-07-30. The planner runs unattended on the NAS hourly (it was every
+3 hours when this was written; the move to hourly came with the PV-cache widening), the
 day-after report runs at 06:10, and both feed Grafana. What remains is listed here rather
 than in `NAS-DEPLOYMENT-PLAN.md`, which is the record of *how the thing was built* and is
 long enough already.
@@ -169,6 +170,17 @@ to conclude rather than fitting anyway.
   now measured, so that is a question with an answer coming.
 - **Battery capacity 27,900 -> ~30,500 Wh.** Parked: "Let's not change the capacity of the
   battery right now."
+- **`soc_curve.py` -- fitted, committed, and deliberately not wired in.** A measured
+  non-linear Wh-per-SoC-point curve (see the module docstring for the derivation and its
+  4.3% vs 11.5% MAE against the flat constant), rebuildable with
+  `scripts/fit_soc_curve.py`. Nothing imports it: the planner still plans on
+  `hardware.CAPACITY_WH`'s flat 279 Wh/point. Note that `soc_curve.CAPACITY_WH` is the
+  integral of the fitted curve and does *not* agree with `hardware.CAPACITY_WH` -- that is
+  the same question as the capacity item above, arrived at from the other end, and the two
+  should be settled together. Wiring it in means touching the optimiser's SoC accounting,
+  which is a separate piece of work with its own backtest.
+  `scripts/fit_soc_curve.py` needs numpy and scipy, which `requirements.txt` does not carry
+  (the fit is a laptop job, not something the NAS image runs).
 
 ---
 
