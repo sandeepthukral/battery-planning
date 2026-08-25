@@ -172,7 +172,7 @@ def test_forecast_lines_carry_the_run_tag():
 
 
 def test_run_stamp_is_utc_with_a_z():
-    """Matching how Marstek-planning.py stamps plan_run. A local stamp with a Z suffix
+    """Matching how planner.py stamps plan_run. A local stamp with a Z suffix
     parses two hours late in summer, which is how the load-profile tests first failed."""
     stamp = ws.runStamp(datetime(2026, 8, 2, 12, 0, tzinfo=ix.LOCAL_TZ or timezone.utc))
     assert stamp.endswith("Z")

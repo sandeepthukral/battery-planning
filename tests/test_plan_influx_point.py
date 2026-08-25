@@ -30,7 +30,7 @@ def _write(planner, monkeypatch):
 
     influx_source is patched through monkeypatch rather than assigned: it is a real
     imported module, shared with every other test in the session, and the planner fixture
-    re-executes Marstek-planning.py - which calls influx_source.configured() at import - for
+    re-executes planner.py - which calls influx_source.configured() at import - for
     each one. A stub left behind breaks the next test's import, not this test.
     """
     written = []

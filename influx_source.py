@@ -1,4 +1,4 @@
-"""InfluxDB data source for Marstek-planning.py, backed by alphaess-collector.
+"""InfluxDB data source for planner.py, backed by alphaess-collector.
 
 Replaces the Domoticz feeds that had no standalone substitute:
 
@@ -457,7 +457,7 @@ def hourlyAvgProfileWh(field=FIELD_LOAD, days=7, weightIncrease=0.0):
     """Average energy per hour-of-day over the last `days` COMPLETE local days, as
     [["HH", Wh], ...].
 
-    Matches the shape Marstek-planning.py's calcHourlyAvgUsage() returns. More
+    Matches the shape planner.py's calcHourlyAvgUsage() returns. More
     recent days can be weighted up via weightIncrease (0 = flat average), mirroring
     the original Domoticz behaviour.
 

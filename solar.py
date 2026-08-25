@@ -1,7 +1,7 @@
 """Sun position and elevation-loss-curve interpolation, in one place.
 
 CODE-REVIEW.md D5. Before this, the same NOAA solar-elevation approximation existed
-three times - Marstek-planning.py's solarElevation() (date+hour strings, HTTP-resolved
+three times - planner.py's solarElevation() (date+hour strings, HTTP-resolved
 site location, its own +30-minute hour-midpoint), fit_pv_elevation.py's solarElevation()
 (lat/lon + an exact instant, because the planner's version cannot resolve anything finer
 than an hour - see that file's docstring), and clean_backtest_csv.py's solar_elevation()
@@ -13,11 +13,11 @@ elevation() below is that formula, written once, taking the most general inputs 
 lon, an exact aware instant) so every caller adapts to it rather than the other way
 round. fit_pv_elevation.py no longer needs checkAgreement() as a drift guard - there is
 only one implementation left to drift from itself - though it still keeps its own
-integration test that Marstek-planning.py's *wrapper* around this produces the same
+integration test that planner.py's *wrapper* around this produces the same
 answer at whole hours, which is a different and still-useful thing to check.
 
 interpolate() is the (elevation_deg, retained_fraction) curve lookup - the same linear
-interpolation Marstek-planning.py's pvElevationCalibration() and fit_pv_elevation.py's
+interpolation planner.py's pvElevationCalibration() and fit_pv_elevation.py's
 _interp() each implemented separately.
 """
 import math

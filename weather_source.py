@@ -40,7 +40,7 @@ import influx_source as ix
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Almere centre. The planner's own siteLatitude/siteLongitude (52.5/5.5, Marstek-planning.py)
+# Almere centre. The planner's own siteLatitude/siteLongitude (52.5/5.5, planner.py)
 # is used for sun elevation, where 15 km is a fraction of a degree and does not matter. It
 # does matter here: cloud cover is a local thing, and 52.5/5.5 is open water north-east of
 # the city. Overridable so this file does not have to be edited per site.

@@ -39,7 +39,7 @@ RAW = sys.argv[1] if len(sys.argv) > 1 else "backtest_input_hourly.csv"
 CLEAN = sys.argv[2] if len(sys.argv) > 2 else "backtest_input_hourly_clean.csv"
 EXCLUDED = CLEAN.rsplit(".", 1)[0] + ".excluded.json"
 
-NAMEPLATE_KWP = 4.98            # 12 x 415 Wp, see pvGroups in Marstek-planning.py
+NAMEPLATE_KWP = 4.98            # 12 x 415 Wp, see pvGroups in planner.py
 LAT, LON = 52.5, 5.5            # Flevoland
 TZ = ZoneInfo("Europe/Amsterdam")
 UTC = ZoneInfo("UTC")
@@ -51,7 +51,7 @@ def clearsky_weight(dt_local):
     """Relative clear-sky yield weight for an hour; 0 when the sun is down.
 
     Elevation at the MIDPOINT of the hour starting at dt_local, hence the +30min -
-    the same convention Marstek-planning.py's own solarElevation() uses (see
+    the same convention planner.py's own solarElevation() uses (see
     solar.py, CODE-REVIEW.md D5, which now holds the one copy of the formula itself).
     """
     elev = solar.elevation(LAT, LON, dt_local + timedelta(minutes=30))

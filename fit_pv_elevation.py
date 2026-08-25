@@ -47,7 +47,7 @@ def planner():
     curve renders as a plausible number rather than an error.
     """
     spec = importlib.util.spec_from_file_location(
-        "marstek_planning", os.path.join(HERE, "Marstek-planning.py"))
+        "planner", os.path.join(HERE, "planner.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -58,7 +58,7 @@ BIN_DEG = 5
 
 def checkAgreement(mod, when, tolerance=1.0):
     """The planner's hourly elevation against solar.elevation() at the same instant,
-    via its own date/hour-string wrapper (see Marstek-planning.py's solarElevation()).
+    via its own date/hour-string wrapper (see planner.py's solarElevation()).
 
     CODE-REVIEW.md D5 removed this file's own copy of the elevation formula - both
     call sites now share solar.py's implementation, so a FORMULA disagreement can no

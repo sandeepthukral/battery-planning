@@ -7,7 +7,7 @@ _mergeLoadIntoPriceList() body).
 
 
 def _row(seq, hour, day="2026-01-01"):
-    # matches Marstek-planning.py's priceList row shape
+    # matches planner.py's priceList row shape
     return [seq, 0.20, "%s %02d:00" % (day, hour), "%s %02d:00" % (day, hour),
             0, 0, 0, 0.20, 0.20]
 

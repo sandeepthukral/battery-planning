@@ -40,7 +40,7 @@ services:
       # p1_to_backtest_csv.py defaults to the Mac path, which does not exist here. Point it at
       # the read-only archive mount instead of moving the file, as its own comment asks.
       P1_CSV: ${P1_CSV:-/archive/sparky-export-20260724/p1_elec_15min_agg.csv}
-      # Both halves of the clock, from one knob. BT_TZ drives Marstek-planning.py's own
+      # Both halves of the clock, from one knob. BT_TZ drives planner.py's own
       # wall-clock helpers; TZ drives the shell `date` calls in plan-now.sh.
       BT_TZ: ${BT_TZ:-Europe/Amsterdam}
       TZ: ${BT_TZ:-Europe/Amsterdam}

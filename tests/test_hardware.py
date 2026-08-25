@@ -1,6 +1,6 @@
 """hardware.py is the single source for battery capacity (CODE-REVIEW.md D4).
 
-Before this, 27900 was written down separately in Marstek-planning.py, advise.py and
+Before this, 27900 was written down separately in planner.py, advise.py and
 report_day.py. This test is the actual point of the fix: it fails if any of the three
 ever drifts from hardware.py again, which a grep for "27900" would not catch after a
 capacity change edited two of the three but missed one.
@@ -54,5 +54,5 @@ def test_report_day_py_bt_cap_still_overrides():
     assert float(result.stdout.strip()) == 12345.0
 
 
-def test_marstek_planning_reads_the_shared_constant(planner):
+def test_planner_reads_the_shared_constant(planner):
     assert planner.ratedBatteryCapacity == hardware.CAPACITY_WH

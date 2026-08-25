@@ -2,7 +2,7 @@
 
 Run for real, with BT_DATA_DIR pointed at a tmp_path (plan-now.sh already supports
 this - see its own comment on splitting code location from output location) and PY
-replaced with a stub that stands in for Marstek-planning.py.
+replaced with a stub that stands in for planner.py.
 """
 import os
 import stat

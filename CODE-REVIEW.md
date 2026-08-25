@@ -4,6 +4,11 @@ A senior-engineer pass over the whole repo on 2026-07-31, branch
 `nas-planner-and-grid-limits`. Named `CODE-REVIEW.md` rather than `CORE-REVIEW.MD` — I read
 that as a typo, and `CODE-` is what a future reader will search for.
 
+> **Naming note.** The optimiser was called `Marstek-planning.py` when this was written; it
+> was renamed to `planner.py` on 2026-08-25. References below keep the old name, because this
+> is a dated record of a review rather than current documentation. Line numbers cited here are
+> from that date too and have since moved.
+
 Scope: `Marstek-planning.py`, `influx_source.py`, `report_day.py`, `advise.py`,
 `fit_pv_elevation.py`, `clean_backtest_csv.py`, `p1_to_backtest_csv.py`,
 `influx_to_backtest_csv.py`, the four shell entry points, `Dockerfile`,

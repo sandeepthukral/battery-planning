@@ -2,6 +2,11 @@
 
 Status: **planned, not started.** Written 2026-07-28, revised 2026-07-30.
 
+> **Naming note.** The optimiser was called `Marstek-planning.py` when this was written; it was
+> renamed to `planner.py` on 2026-08-25. References below keep the old name, because this is the
+> record of how the deployment was built rather than current documentation. The DSM Task
+> Scheduler entries are unaffected: they invoke `scripts/plan.sh`, whose name did not change.
+
 Blocked on the `alphaess-collector` repo finishing its reorganisation — that side owns the
 InfluxDB, the Grafana, and the docker network this plan attaches to. See
 [Cross-repo contract](#cross-repo-contract-alphaess-collector) for exactly what is needed
