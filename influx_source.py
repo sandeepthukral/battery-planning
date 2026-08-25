@@ -412,7 +412,7 @@ def planPoints(start, stop, measurement="plan"):
     """Stored plan intervals starting in [start, stop), one dict per point.
 
     Every run writes a full horizon, so an interval is normally covered by several plans -
-    the 02:05 run and the 14:05 run both have an opinion about 18:00. They are all returned,
+    the 02:55 run and the 13:55 run both have an opinion about 18:00. They are all returned,
     each carrying its plan_run tag; deciding which one was in force is the caller's job.
 
     Returns [{"plan_run": str, "time": aware local datetime, "soc_wh": float, ...}].

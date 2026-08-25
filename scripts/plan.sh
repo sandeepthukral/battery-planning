@@ -1,6 +1,14 @@
 #!/bin/sh
-# One planning pass, for DSM Task Scheduler. Run as root, hourly at :05. The run at or after
-# 13:05 is the first to see tomorrow's day-ahead prices, published around 13:00.
+# One planning pass, for DSM Task Scheduler. Run as root, hourly at :55 - five minutes BEFORE
+# the hour it plans for, not after it. The 13:55 run is the first to see tomorrow's day-ahead
+# prices, published around 13:00.
+#
+# The :55 is deliberate and was arrived at by observation. On the old :05 schedule the battery
+# sat idle for roughly the first ten minutes after each run; publishing the plan just before an
+# interval boundary means it is already in force when the new interval starts, which removed
+# the stall (or at least halved the window it can occupy). The cause was never diagnosed, so
+# treat this as a mitigation: if the stall reappears, note whether it is charging or
+# discharging that stops, which should identify the path.
 #
 # Advice only. Nothing here sends anything to the battery.
 #
