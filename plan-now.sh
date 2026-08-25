@@ -30,9 +30,9 @@ export PYTHONPATH=${PYTHONPATH:-$scriptDir}
 
 # Pin the wall clock before reading it. Everything here - the plan filename, BT_START,
 # BT_STARTHOUR, the energy-tax year - comes from `date`, which follows TZ. A container
-# defaults to UTC, so without this the 14:05 run would ask the planner to start at hour 12
+# defaults to UTC, so without this the 13:55 run would ask the planner to start at hour 11
 # and would write its plan under the wrong hour, while Marstek-planning.py's own clock (see
-# its "Wall clock" block) correctly said 14. The two must not be allowed to disagree.
+# its "Wall clock" block) correctly said 13. The two must not be allowed to disagree.
 #
 # Keyed off BT_TZ, not TZ, and deliberately so. Defaulting with ${TZ:-...} would let an
 # image that sets TZ=UTC win, which is precisely the case this exists to defend against.

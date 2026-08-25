@@ -301,7 +301,7 @@ except ImportError as e:
 #
 # The consequence is not cosmetic. getPricesFromEnergyZero() decides whether tomorrow's
 # day-ahead prices should exist yet from "current hour >= 15". Under UTC that test fires at
-# 17:00 local, so the 14:05 run - the one whose entire purpose is to pick up the ~13:00
+# 17:00 local, so the 13:55 run - the one whose entire purpose is to pick up the ~13:00
 # price release - would plan a short horizon and say nothing about it.
 #
 # These return NAIVE datetimes deliberately. The rest of the file compares naive values
@@ -1536,7 +1536,7 @@ def buildInitialPlanningList():
             # Between 13:00 and 15:00 this expected only 24 intervals when 48 were
             # really available, which happens to be harmless today only because the
             # check merely decides whether to bother falling back to EnergyZero - but
-            # the 14:05 run's entire purpose is to be the first to see tomorrow, and an
+            # the 13:55 run's entire purpose is to be the first to see tomorrow, and an
             # under-expectation here is exactly the condition that check exists to catch.
             if currentHour>=pricePublishHour:
                 expectedIntervals=48
