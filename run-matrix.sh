@@ -23,7 +23,6 @@ for power in 5000 10000; do
       # force the regime explicitly: every date in this matrix predates salderingEndDate,
       # so the planner's "auto" default would make both legs saldering-on
       export BT_SALDERING=$sald
-      nflag=""
       [[ $cap == 27900 ]] && btag="batt" || btag="base"
       ptag=$((power/1000))kw
       tag=${ptag}_${sald}_${btag}
@@ -36,7 +35,7 @@ for power in 5000 10000; do
       else
         export BT_CAP=$cap BT_MAXCHG=$power BT_MAXDIS=$power
       fi
-      $PY Marstek-planning.py -s -p -u -b -h $nflag > results/_run_${tag}.log 2>&1
+      $PY Marstek-planning.py -s -p -u -b -h > results/_run_${tag}.log 2>&1
       mv entsoe-output20250701.txt results/out_${tag}.txt
       line=$(LC_NUMERIC=C awk -v p=$((power/1000)) -v s=$sald -v b=$btag \
         'NR>1{c+=$NF} END{printf "%s\t%s\t%s\t%.2f\t%d",p,s,b,c,NR-1}' results/out_${tag}.txt)

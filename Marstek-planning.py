@@ -9,8 +9,6 @@ minBatterySOCPctIDX=24          # the IDX of the Domoticz user variable holding 
 maxBatteryChargeSpeedIDX=15     # the IDX of the Domoticz user variable holding the maximum charge speed in W
 maxBatteryDischargeSpeedIDX=16  # the IDX of the Domoticz user variable holding the maximum discharge speed in W
 RTEIDX=20                       # the IDX of the Domoticz user variable holding the value for the round trip conversion efficiency % of the battery system
-MACaddressIDX=30                   # the IDX of the Domoticz user variable holding the MAC address of the Marstek battery (for use in mqtt)
-# !!! to be added : MAC address
 ## price elements
 energyTaxIDX=4                  # the IDX of the Domoticz user variable holding the energyTax per kWh, incl. VAT/BTW
 vatIDX=13                       # the IDX of the Domoticz user variable holding the VAT/BTW percentage
@@ -218,21 +216,12 @@ baseJSON="http://"+domoticzIP+":"+domoticzPort+"/json.htm?"   # the base string 
 ## end of Domoticz integration definition ########################################################################################
 
 
-# See below for configuration data of MQTT broker !!!!!!!!!!!!!!!!!!
-# MQTT Broker settings
-BROKER = "192.168.178.254"      # The IP address of the broker
-PORT = 1883                     # The port of the broker, normally 1883
-MQTT_SUB = "hame_energy/VNSA-0/device/" # the intial part of the MQTT subscribe string, please adjust device type (here VNSA-0)
-MQTT_PUB = "hame_energy/VNSA-0/App/"    # the intial part of the MQTT publish string, please adjust device type (here VNSA-0)
-
 ##################################################################################################################################
 
-from operator import itemgetter, attrgetter
-from datetime import date,datetime,timedelta,timezone
+from datetime import datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
 import xml.etree.ElementTree as ET
 import requests
-import copy
 import json
 import time, math
 import sys
@@ -240,10 +229,6 @@ import os
 import csv
 import urllib.parse
 import pulp
-import paho.mqtt.client as mqtt
-
-import sqlite3
-from sqlite3 import Error
 
 import solar
 import http_config
@@ -368,144 +353,6 @@ today=localToday()
 todayString=datetime.strftime(today,'%Y%m%d')
 todayLongString=datetime.strftime(today,'%Y-%m-%d')
 
-##### MQTT functions #####
-
-def extract_mqtt_data(data):
-    global initialCharge,commandAcknowlegde,modeAcknowledge,currentMode,periodDefinition
-    working_status=["sleep","standby","charging","discharging","backup","ota upgrade","bypass"]
-    working_mode=["automatic","manual","trading","passive","UPS","AI"]
-    offonmode=["off","on"]
-    onoffmode=["on","off"]
-    initialCharge=None
-    commandAcknowlegde=None
-    modeAcknowledge=None
-    currentMode=None
-    periodDefinition=None
-    if data!=None:
-        for pair in data.split(","):
-            key, value = pair.split("=", 1)
-            if debug:
-                if "|" in value:
-                    print("key",key,"value",value.split("|"))
-                else:
-                    print("key",key,"value",value)
-                if key=="tot_i": print("##########","total grid input energy: ",int(value)/100," kWh")
-                elif key=="tot_o": print("##########","total grid output energy: ",int(value)/100, " kWh" )
-                elif key=="grd_o": print("##########","combined power (in-/out+) :",value, " W")
-                elif key=="grd_t": print("##########","working status :",working_status[int(value)])
-                elif key=="cel_p": print("##########","actual capacity :",int(value)/100,"kWh")
-                elif key=="cel_c": print("##########","SOC :",value," %")
-                elif key=="wor_m": print("##########","working mode :",working_mode[int(value)])
-                elif key=="mcp_w": print("##########","max charge :",value," W")
-                elif key=="mdp_w": print("##########","max discharge :",value," W")
-                elif key=="pv1": print("##########","pv1 power :",int(value.split("|")[0])/10," W")
-                elif key=="pv2": print("##########","pv2 power :",int(value.split("|")[0])/10," W")
-                elif key=="api": print("##########","api on/off :", offonmode[int(value)])
-                elif key=="bl": print("##########","bluetooth lock on/off :", onoffmode[int(value)])
-                elif key=="gp" : print("##########","power in(-)/out(+) from/to grid :",value)
-                elif key=="bp" : print("##########","battery power in/out :", value)
-                elif key=="rp" : print("##########","inverter power usage ? ",value, " W")
-                elif key=="pv" : print("##########","pv energy today : ",int(value.split("|")[0])/100," kWh")
-                elif key=="fu" : print("##########","surplus feed-in : ",offonmode[int(value.split("|")[0])])
-            if key=="cel_p" : initialCharge=int(value)*10
-            if key=="cd" : commandAcknowlegde=int(value)
-            if key=="md" : modeAcknowledge=int(value)
-            if key=="wor_m" : currentMode=working_mode[int(value)]
-            if key=="tim_0": periodDefinition=str(value)
-        if debug:
-            print("key values received : initialCharge ",initialCharge," command acknowledge ",commandAcknowlegde," mode acknowledge",modeAcknowledge," current mode ",currentMode)
-
-
-# Callback when the client connects to the broker
-def on_mqtt_connect(client, userdata, flags, reason_code, properties):
-    if reason_code == 0:
-        if debug: print("✅ Connected to MQTT Broker!")
-        client.subscribe(TOPIC_SUB)
-        if debug: print(f"📡 Subscribed to topic: {TOPIC_SUB}")
-    else:
-        if debug: print(f"❌ Failed to connect, reason code {reason_code}")
-
-# Callback when a message is received
-def on_mqtt_message(client, userdata, msg):
-    try:
-        payload = msg.payload.decode("utf-8")
-        if debug: print(f"📥 Received message from {msg.topic}: {payload}")
-        extract_mqtt_data(payload)
-    except UnicodeDecodeError:
-        print("⚠ Received non-text message")
-
-# Optional logging callback (updated signature)
-def on_mqtt_log(client, userdata, level, buf):
-    if debug: print(f"LOG: {buf}")
-
-# intial setup
-def mqtt_setup():
-    global client,initialCharge,commandAcknowlegde,modeAcknowledge,currentMode,periodDefinition,BROKER,PORT,TOPIC_SUB,TOPIC_PUB,CLIENT_ID
-    TOPIC_SUB=MQTT_SUB+MACaddress+"/ctrl"
-    TOPIC_PUB=MQTT_PUB+MACaddress+"/ctrl"
-    CLIENT_ID = f"mqtt-client-{int(time.time())}"
-    initialCharge=None
-    commandAcknowlegde=None
-    modeAcknowledge=None
-    currentMode=None
-    periodDefinition=None
-    # Create MQTT client instance (API v2)
-    client = mqtt.Client(
-        client_id=CLIENT_ID,
-        clean_session=True,
-        protocol=mqtt.MQTTv311,
-        transport="tcp",
-        userdata=None,
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2
-    )
-
-    # Assign callbacks
-    client.on_connect = on_mqtt_connect
-    client.on_message = on_mqtt_message
-    # client.on_log = on_mqtt_log  # Uncomment for debug logs
-
-def mqtt_publish(message):
-        result = client.publish(TOPIC_PUB, message, qos=1)
-        status = result.rc  # Updated access
-        if status == mqtt.MQTT_ERR_SUCCESS:
-            if debug: print(f"📤 Sent message to {TOPIC_PUB}: {message}")
-        else:
-            if debug: print(f"❌ Failed to send message to {TOPIC_PUB}")
-
-def mqtt_send_receive(message,expected_response):
-    global commandAcknowlegde
-    commandAcknowlegde=None
-    try:
-        # Connect to broker
-        client.connect(BROKER, PORT, keepalive=60)
-
-        # Start network loop
-        client.loop_start()
-
-        # Publish message
-        mqtt_publish(message)
-        time.sleep(3)
-
-        # Keep running and repeat message until acknowledged
-        print("Listening for incoming messages... Press Ctrl+C to exit.")
-        while expected_response!=commandAcknowlegde:
-            if debug: print(expected_response!=commandAcknowlegde,expected_response,commandAcknowlegde)
-            time.sleep(30)
-            if debug: print("Listening for incoming messages... Press Ctrl+C to exit.")
-            mqtt_publish(message)
-            time.sleep(3)
-
-    except KeyboardInterrupt:
-        if debug: print("\n🛑 Disconnecting from broker...")
-
-    except Exception as e:
-        if debug: print(f"⚠ Error: {e}")
-
-    finally:
-        client.loop_stop()
-        client.disconnect()
-##### End of MQTT function
-
 ##### Start of input data collection functions
 
 def _ask(envname, prompt, default):
@@ -570,7 +417,7 @@ def _resolveInitialCharge(initialChargeSpec,startdate,ratedBatteryCapacity):
 def getUserInput():
     # get user input, with limited (!!) input validation, only used in standalone mode
     # every prompt can be pre-set via an environment variable for scripted batch runs
-    global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts,MACaddress,gridConnectionLimit
+    global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts,gridConnectionLimit
     startdate=_ask("BT_START","Enter startdate as YYYYMMDD (default=today)   : ",todayString)
     enddate=_ask("BT_END","Enter enddate as YYYYMMDD (default=startdate+1) : ",datetime.strftime(datetime.strptime(startdate,'%Y%m%d')+timedelta(days=1),'%Y%m%d'))
     starthour=int(_ask("BT_STARTHOUR","Enter start hour as HH (default next hour)   : ",datetime.strftime(localNow()+timedelta(hours=1),'%H')))
@@ -593,7 +440,6 @@ def getUserInput():
     RTE=int(_ask("BT_RTE","Enter conversion efficiency percentage RTE (default 85) :",85))
     onewayEff=float((100-(100-RTE)/2)/100)
     entsoeToken='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'  # paste in your own security token from entsoe.eu
-    MACaddress="xxxxxxxxxxxxxxxxxx" # paste the MAC address of your battery system here.
     energyTax=float(_ask("BT_ETAX","Enter energy tax in Euro per kWh (default 0.11085) :",0.11085)) # energy tax , incl btw, Euro per kWh
     supplierCosts=0.01682  # supplier/purchasing costs per kWh incl btw
     cycleCosts=float(os.environ.get("BT_CYCLECOSTS",cycleCosts)) # default set with the battery constants at the top of this file
@@ -602,7 +448,7 @@ def getUserInput():
 
 def getPlanningInput():
     # read initial planning data from Domoticz variables and devices (instead of user input)
-    global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts,MACaddress
+    global initialCharge,ratedBatteryCapacity,maxChargeSpeed,maxDischargeSpeed,minBatterySOCPct,startdate,enddate,starthour,entsoeToken,onewayEff,energyTax,vatPCT,supplierCosts,networkCosts,cycleCosts
 
     getPlanningInputSuccess=True
 
@@ -611,18 +457,10 @@ def getPlanningInput():
     starthour=int(datetime.strftime(localNow(),'%H'))  # current hour. This assumes the program is called from domoticz at the start of the hour.
 
 
-    responseResult,varValue=getUserVariable(MACaddressIDX)
-    if responseResult: MACaddress=varValue
-    print(MACaddress)
+    # charge level comes from the Domoticz device created by the Marstek Venus plugin
+    responseResult,varValue=getBatteryChargeLevel() # actual charge in Wh
+    if responseResult: initialCharge=float(varValue)
     getPlanningInputSuccess=getPlanningInputSuccess and responseResult
-
-    if mqttQuery: # get from Marstek cloud
-        mqtt_setup()
-        mqtt_send_receive("cd=01",1)
-    else: # or get from Domoticz device created by Marstek Venus plugin
-        responseResult,varValue=getBatteryChargeLevel() # actual charge in Wh
-        if responseResult: initialCharge=float(varValue)
-        getPlanningInputSuccess=getPlanningInputSuccess and responseResult
 
     responseResult,varValue=getUserVariable(minBatterySOCPctIDX)
     if responseResult: minBatterySOCPct=float(varValue)
@@ -935,7 +773,7 @@ def updateSelectorSwitch(varIDX,switchLevel):
     return responseResult
 
 def setBatteryAction(action,scheduleDateTime,power,schedule):
-# interface to Marstek battery, either via plugin or mqtt
+# interface to the battery via the Domoticz plugin devices
     startHr=int(scheduleDateTime[11:13])
     startMin=int(scheduleDateTime[14:15])
     currentMinute=int(localNow().minute)
@@ -972,52 +810,26 @@ def setBatteryAction(action,scheduleDateTime,power,schedule):
     endtimeString=f"{endHr:02d}:{endMin:02d}"
     weekdaySchedule="1111111"
     manualPeriodID="0"
-    if mqttQuery:
-        if action=="AutoSelf": # use auto
-            message="cd=02,md=0"
-            expected_response=2
-        elif action=="AI": # use auto instead
-            message="cd=02,md=0"
-            expected_response=2
-        elif action=="Manual":
-            message="cd=03,md=1,nm=0,bt="+starttimeString+",et="+endtimeString+",wk=127,vv="+str(power)+",as=1"
-            expected_response=3
-        elif action=="Passive": # use manual zero power and disabled instead
-            message="cd=03,md=1,nm=0,bt="+starttimeString+",et="+endtimeString+",wk=127,vv="+str(power)+",as=0"
-            expected_response=3
-        elif action=="UPS": # use manual charge full power instead
-            message="cd=03,md=1,nm=0,bt="+starttimeString+",et="+endtimeString+",wk=127,vv="+"-"+str(maxChargeSpeed)+",as=1"
-            expected_response=3
-        if debug: print("MQTT message ",message," expected response ",expected_response)
-        if debug: print("Waiting 30 seconds for next mqtt command.")
-        time.sleep(30) # make sure at least 30 seconds have passed since previous mqtt message
-        mqtt_send_receive(message,expected_response)
-        if debug: print("Waiting 30 seconds for next mqtt command.")
-        time.sleep(30)
-        mqtt_send_receive("cd=01",1) # confirm request has been processed
-        if debug: print("result of set battery action via mqtt : current Charge ",initialCharge," current Mode ",currentMode," period definition ",periodDefinition)
+    try:
+        clearTextDevice(periodIDX)
+        setTextDevice(periodIDX,manualPeriodID)
+        clearTextDevice(starttimeIDX)
+        setTextDevice(starttimeIDX,starttimeString)
+        clearTextDevice(endtimeIDX)
+        setTextDevice(endtimeIDX,endtimeString)
+        clearTextDevice(weekdayIDX)
+        setTextDevice(weekdayIDX,weekdaySchedule)
+        updatePowerDevice(powerIDX,power)
+        if action=="AutoSelf": setLevel=10
+        elif action=="AI": setLevel=20
+        elif action=="Manual": setLevel=30
+        elif action=="Passive": setLevel=40
+        elif action=="UPS": setLevel=50
+        updateSelectorSwitch(batterySwitchIDX,setLevel)
         responseResult=True
-    else:
-        try:
-            clearTextDevice(periodIDX)
-            setTextDevice(periodIDX,manualPeriodID)
-            clearTextDevice(starttimeIDX)
-            setTextDevice(starttimeIDX,starttimeString)
-            clearTextDevice(endtimeIDX)
-            setTextDevice(endtimeIDX,endtimeString)
-            clearTextDevice(weekdayIDX)
-            setTextDevice(weekdayIDX,weekdaySchedule)
-            updatePowerDevice(powerIDX,power)
-            if action=="AutoSelf": setLevel=10
-            elif action=="AI": setLevel=20
-            elif action=="Manual": setLevel=30
-            elif action=="Passive": setLevel=40
-            elif action=="UPS": setlevel=50
-            updateSelectorSwitch(batterySwitchIDX,setLevel)
-            responseResult=True
-        except Exception:
-            print("ERROR: unable to update device for setting battery action")
-            responseResult=False
+    except Exception:
+        print("ERROR: unable to update device for setting battery action")
+        responseResult=False
 
     fullSchedule="<br>date_______time__pvD__pvI___use__nett_chrgD_chrg_dscg__soc__imp__exp_pr-buy_pr-sell__cost<br>"
     for nr,record in enumerate(schedule):
@@ -2476,7 +2288,7 @@ def outputToBattery(schedule,starthour,result):
 
 def processCLarguments():
     # get command line arguments to determine the run modes
-    global debug,outputMode,runMode,includePV,includeUsage,zeroGridCharge,includeTax,saldering,hourAvgPlanning,mqttQuery
+    global debug,outputMode,runMode,includePV,includeUsage,zeroGridCharge,includeTax,hourAvgPlanning
     debug=False
     outputMode=False
     runMode="standalone"
@@ -2484,13 +2296,11 @@ def processCLarguments():
     includeUsage=False
     zeroGridCharge=False
     includeTax=False
-    saldering=False
     hourAvgPlanning=False
     CLargSuccess=True
-    mqttQuery=False
     try:
         for i in range(len(sys.argv)-1):
-            if sys.argv[i+1] not in ["-t","-v","-q","-d","-s","-i","-p","-u","-z","-b","-n","-h","-m"]:
+            if sys.argv[i+1] not in ["-t","-v","-q","-d","-s","-i","-p","-u","-z","-b","-n","-h"]:
                 raise Exception
             # use one of the 3 next arguments to set output level
             if sys.argv[i+1]=="-t": # trace
@@ -2534,16 +2344,12 @@ def processCLarguments():
 
             # set whether saldering/netting applies
             if sys.argv[i+1]=="-n": # netting/saldering
-                saldering=True
-                # keep the flag meaning "force it on", overriding the date rule
+                # the flag means "force it on", overriding the date rule
                 globals()["salderingMode"]="on"
 
             # set planning interval qtr (=15min) or hour
             if sys.argv[i+1]=="-h": # plan with hr avg even if 15 min data available
                 hourAvgPlanning=True
-
-            if sys.argv[i+1]=="-m": # mqtt marstek querying
-                mqttQuery=True
 
     except Exception:
         print("Following command line arguments are recognised: -t,-v,-q and -d,-s and -p and -z and -b and -n and -h")
@@ -2564,7 +2370,6 @@ def processCLarguments():
         print("     By default saldering is decided per interval: on before "+salderingEndDate+",")
         print("     off from then. Set BT_SALDERING=auto|on|off to control it directly.")
         print("-h = plan hourly intervals instead of 15 minute")
-        print("-m = use Marstek mqtt query to get required start data")
         print("     ")
         CLargSuccess=False
     return CLargSuccess

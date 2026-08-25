@@ -54,7 +54,6 @@ It is a python program that is started from a command line with various command 
 * -b : tax included (energytax and VAT/BTW)
 * -z : zero import from grid (discouraged, might not always leed to optimised results)
 * -h : hourly average price, otherwise 15-minute prices
-* -m : use mqtt communication to Marstek cloud to get current capacity and to set mode , instead of Marstek Venus plugin via Open API. If using mqtt, please allow for the 30 seconds intervals between mqtt commands to complete. 
 
 Most of what varies run to run (dates, battery capacity/speed overrides, SOC, price cache
 locations, backtest input, terminal reserve behaviour, ...) is controlled by `BT_*` environment
@@ -65,7 +64,7 @@ interactive session.
 It can for example be scheduled from cron, from domoticz or run manually. It is specifically designed to run at the start of each price interval (for example hour) to set the battery mode for the coming interval, but taking into accouunt all know future prices etc. 
 
 As an example, I currently use it with the following line in the crontab:
-0 * * * * /usr/bin/python3 /home/pi/hame-relay/Marstek-planning.py -d -p -u -n -b -h -m >> /home/pi/hame-relay/batteryplanning.log 2>&1
+0 * * * * /usr/bin/python3 /home/pi/hame-relay/Marstek-planning.py -d -p -u -n -b -h >> /home/pi/hame-relay/batteryplanning.log 2>&1
 
 The standalone mode will interactively request user input and provide feedback on the screen and in a file. The Domoticz mode will take the input from Domoticz variables and devices, load the planning onto a Domoticz text device for display and trigger the next action from the planning and send it to the battery. The standalone mode will only produce a planning (into a file) and not trigger any action.
 
@@ -73,7 +72,7 @@ It has the option to include solar panel production forecast in the planning for
 
 Prices will be taken from entsoe (eu transparency site) or, if not available or complete, from the energyzero website. An API token from entsoe is required, see below. Additional kWh pricing elements can be specified, such as energy tax, supplier purchase fee, network fee, cycle costs, VAT/BTW percentage.
 
-The -m option can be used to circumvent the Marstek open API plugin setup and communicate directly with the Marstek cloud via mqtt. The hame relay setup is required for this (https://github.com/tomquist/hame-relay docker setup without home assistant) and the MAC address of the Marstek battery needs to be provided. Make sure hame-relay is tested (for example with mosquitto_sub and mosquitto_pub commands) and working before using the mqtt option here. 
+Upstream also carried a `-m` option that talked to the Marstek cloud over MQTT (via hame-relay) instead of the Venus plugin. This fork drives an AlphaESS system, so that path could never work here and has been removed; see the upstream project if you need it.
 
 Of course battery characteristics such as current charge, maximum and minimum capacity, maximum charge-speed and discharge-speed and conversion efficiency are taken into account.
 

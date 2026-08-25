@@ -34,7 +34,7 @@ REPO = os.path.dirname(HERE)
 PLANNER = os.path.join(REPO, "Marstek-planning.py")
 FIXTURES = os.path.join(HERE, "fixtures")
 
-# Prefer the checked-in .venv's interpreter (has pulp/requests/paho-mqtt installed);
+# Prefer the checked-in .venv's interpreter (has pulp/requests installed);
 # fall back to the current interpreter, which is what CI's installed-requirements
 # environment provides.
 VENV_PY = os.path.join(REPO, ".venv", "bin", "python")
