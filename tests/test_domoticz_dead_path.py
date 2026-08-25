@@ -60,10 +60,9 @@ def test_domoticz_calls_pass_the_shared_timeout(planner, monkeypatch):
 
 
 def _readySetBatteryAction(planner, monkeypatch, deviceUpdatesSucceed):
-    """Common setup: the non-mqtt branch, with clearTextDevice/setTextDevice/
-    updatePowerDevice/updateSelectorSwitch stubbed out (each already has its own
-    direct tests above) so only setBatteryAction()'s own logic is under test."""
-    monkeypatch.setattr(planner, "mqttQuery", False, raising=False)
+    """Common setup: clearTextDevice/setTextDevice/updatePowerDevice/
+    updateSelectorSwitch stubbed out (each already has its own direct tests
+    above) so only setBatteryAction()'s own logic is under test."""
     monkeypatch.setattr(planner, "hourAvgPlanning", True, raising=False)
     monkeypatch.setattr(planner, "maxChargeSpeed", 4850, raising=False)
     monkeypatch.setattr(planner, "maxDischargeSpeed", 4700, raising=False)

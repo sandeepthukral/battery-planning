@@ -12,10 +12,6 @@ requests==2.34.2
 # as-is, with no coinor-cbc package and no solver path override.
 pulp==3.3.2
 
-# Imported unconditionally at the top of Marstek-planning.py even though the MQTT path is
-# unused here, so the import fails without it and nothing runs.
-paho-mqtt==2.1.0
-
 # Not imported by name anywhere - it is the data behind zoneinfo. python:3.12-slim has no
 # system tzdata, so ZoneInfo("Europe/Amsterdam") raises ZoneInfoNotFoundError without it.
 # Every date and hour in this program is Amsterdam wall-clock; see the "Wall clock" block in
