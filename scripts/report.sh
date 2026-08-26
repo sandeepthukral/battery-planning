@@ -5,10 +5,10 @@
 # Sibling of plan.sh, and deliberately a separate task rather than a tail on the planning run:
 # a planning failure must not take the report with it, and vice versa.
 #
-# Timing: 06:10. Not just after midnight - the last plan of a day is written at 23:05 and the
-# report scores each interval against the plan in force for it, so a 00:05 run would be racing
-# the day it is trying to score. By 06:10 yesterday is closed on both sides: every plan for it
-# exists, and the collector has been writing actuals continuously since.
+# Timing: 06:10. Not just after midnight - the report needs the whole day's actuals, and the
+# plan it scores is the last run that covered the day's first interval, written just before
+# midnight. A 00:05 run would be racing both. By 06:10 yesterday is closed on both sides: the
+# committed plan exists, and the collector has been writing actuals continuously since.
 #
 # 06:10 also sits in the quietest part of the planning schedule - an hour after the 05:05 run,
 # two before the 08:05 one - so the two jobs never contend. An earlier draft chose 08:10 for
@@ -122,6 +122,11 @@ rc=0
 # that point holds that failure's output, not a report - moving it into place would
 # silently replace yesterday's good report with today's error message. Left as OUT.$$
 # instead, so the next successful run overwrites it in the ordinary course of things.
+#
+# rc 3 belongs in that second group on purpose: report_day.py ran fine, and its section 4
+# found that the plan it scored does not conserve energy. That output is a diagnosis, not
+# a report, and publishing it would put a number nobody can earn in front of a reader -
+# which is exactly what happened, unnoticed, for months. Yesterday's report stays put.
 if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
     mv "$OUT.$$" "$OUT"
     archive_old_reports
