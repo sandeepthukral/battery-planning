@@ -1115,7 +1115,9 @@ IDX_PV_DIRECT=4      # forecast/actual Wh from DC-coupled PV (always 0 here - no
 IDX_PV_INDIRECT=5    # forecast/actual Wh from AC-coupled PV (both this installation's groups)
 IDX_LOAD=6           # forecast/actual house load, Wh
 IDX_PRICE_BUY=7      # price to pay for import, EUR/kWh, tax/VAT included
-IDX_PRICE_SELL=8     # price received for export, EUR/kWh - regime depends on salderingApplies()
+IDX_PRICE_SELL=8     # price received for export, EUR/kWh - regime depends on salderingApplies().
+                     # Under saldering this is price_buy MINUS supplierCosts: the tax and BTW
+                     # come back, the sourcing markup was never credited.
 
 def parsePricesIntoList(runDate,hourAverage=False,local_tz="Europe/Amsterdam"):
     # process prices into a list, either per hour or per 15-minute interval
@@ -1201,7 +1203,18 @@ def parsePricesIntoList(runDate,hourAverage=False,local_tz="Europe/Amsterdam"):
             if includeTax:
                 price_usage=price_kwh*vatPCT+energyTax+supplierCosts+networkCosts
                 if salderingApplies(start_local):
-                    price_return=price_usage
+                    # Saldering refunds the energy tax and BTW, but the supplier's sourcing
+                    # markup is never credited: it is what the supplier charges to buy energy
+                    # on your behalf, and on export there is nothing to source. Frank state it
+                    # directly - "wanneer je stroom teruglevert, ontvang je daarom de
+                    # marktprijs die op dat moment geldt", plus the tax back.
+                    #
+                    # This used to be price_return=price_usage, which valued every exported
+                    # kWh one markup too high and tilted the LP towards discharging. Found on
+                    # 2026-08-26 by reconciling report_day.py's savings line against the
+                    # collector's daily_cost: the two disagreed by exactly the markup on every
+                    # exported kWh, from opposite sides.
+                    price_return=price_usage-supplierCosts
                 else:
                     price_return=price_kwh*vatPCT
             else:
@@ -1332,7 +1345,9 @@ def getPricesFromEnergyZero(runDate,hourAvgPlanning,local_tz="Europe/Amsterdam")
             if includeTax:
                 price_usage=price_kwh*vatPCT+energyTax+supplierCosts+networkCosts
                 if salderingApplies(start_local):
-                    price_return=price_usage
+                    # See the matching comment on the ENTSOE path: the sourcing markup is not
+                    # credited on export, so it comes off the salded return price.
+                    price_return=price_usage-supplierCosts
                 else:
                     price_return=price_kwh*vatPCT #!!! to be done: include supplier and network costs?
             else:
