@@ -33,8 +33,12 @@ offered - while the day itself earned 5.82. The headline was not just wrong, it 
 wrong way. report_window.py's docstring had described the mechanism for months; this report
 was simply not applying it.
 
-The chain is still computed and printed, under section 1, as the diagnostic upper bound it
-always was.
+The chain is still computed and printed, under section 1, as a diagnostic. It was first
+labelled an upper bound, and 2026-08-25 disproved that within a week: the chain read +2.73
+where the committed plan read +5.58. It takes only the OPENING move of each run, so when
+those moves are conservative and the payoff sits in each plan's later hours, the chain never
+reaches the payoff and reads low. It is not a ceiling, it is not a floor, and it is not a
+plan - it is what the optimiser promised at each hour, laid end to end.
 
 Prices come off the stored plan points rather than being refetched, so a later price
 revision cannot change a past verdict. That also settles saldering for free: price_sell was
@@ -65,6 +69,19 @@ SCORE_MEASUREMENT = "plan_score"
 # loose. Negative is energy no source in the window supplied - a defect in the scoring, not
 # a fact about the battery - so that side allows only what integer soc_wh and the direct-PV
 # term can explain. The in-force stitch this file used to publish sat at -21%.
+# What the energy each case leaves in the battery is worth, and how far ahead to look for a
+# price to value it at. One interval's sell price was the first basis and it does not survive
+# a large carry: on 2026-08-25 the committed plan closed 12.08 kWh emptier than the day did,
+# and pricing twelve kilowatt-hours off a single quarter-hour was most of the verdict.
+#
+# ONEWAY_EFF is planner.py's own, derived the way report_window.py derives it, so a changed
+# RTE moves all three together. It is applied in the direction that costs the plan: energy it
+# is holding is worth less than face on the way out, energy it is short costs more than face
+# on the way back in.
+CARRY_HOURS = 12
+RTE = float(os.environ.get("BT_RTE", "85"))
+ONEWAY_EFF = (100.0 - (100.0 - RTE) / 2.0) / 100.0
+
 BALANCE_LOSS_TOLERANCE = 0.15
 BALANCE_GAIN_TOLERANCE = 0.03
 BALANCE_FLOOR_WH = 500.0
@@ -191,6 +208,44 @@ def energyBalance(rows, side):
             "intervals": len(usable)}
 
 
+def forwardSellPrice(stop, hours=CARRY_HOURS):
+    """Mean sell price over the plans covering the hours after the window, or None.
+
+    The energy a case leaves in the battery is sold after the window closes, so this is the
+    price that decides what it was worth - not the price at the moment the window happened
+    to end. Read off the stored plan points for the same reason section 1's prices are: a
+    later revision must not be able to change a past verdict.
+
+    inForcePlans() picks one run per interval, so an interval covered by six runs counts
+    once. Returns (mean price, intervals) or None when nothing is stored ahead - a report
+    run before the next day's first plan, which is not the 06:10 case but is the backfill
+    one.
+    """
+    points = ix.planPoints(stop, stop + timedelta(hours=hours), PLAN_MEASUREMENT)
+    if not points:
+        return None
+    chosen, _, _ = inForcePlans(points)
+    prices = [p["price_sell"] for p in chosen.values() if p.get("price_sell") is not None]
+    if not prices:
+        return None
+    return sum(prices) / len(prices), len(prices)
+
+
+def carryValue(surplusWh, price):
+    """What the closing-SoC difference is worth, in euros, signed towards the plan.
+
+    Positive surplus is energy the plan is holding: worth less than face, because getting it
+    out of the battery costs a one-way efficiency. Negative surplus is energy the plan spent
+    that reality still had: worth more than face against it, because putting it back costs
+    the same efficiency in the other direction. Both directions are priced at the SELL price,
+    which is the generous reading for a plan that closes short - replacing that energy would
+    really cost the BUY price - and saying so is cheaper than arguing about it.
+    """
+    if surplusWh >= 0:
+        return surplusWh / 1000.0 * price * ONEWAY_EFF
+    return surplusWh / 1000.0 * price / ONEWAY_EFF
+
+
 def closingSocGap(rows):
     """(Wh the plan leaves in the battery above what reality left, the price it closes at).
 
@@ -250,9 +305,9 @@ def collectWindow(start, stop, planRun=None, committed=False):
     from the measured SoC, so the gap being measured resets to zero at each seam.
 
     committed=True picks that run automatically - see committedRun() - and is what the day
-    report uses. The same seam that hides drift also inflates money, and for the same
+    report uses. The same seam that hides drift also corrupts money, and for the same
     reason. The in-force chain is still built and returned as rollingRows so section 1 can
-    print it as the upper bound it is.
+    print it as a diagnostic beside the plan that was actually on offer.
     """
     points = ix.planPoints(start, stop, PLAN_MEASUREMENT)
     if not points:
@@ -292,7 +347,10 @@ def collectWindow(start, stop, planRun=None, committed=False):
         return rows
 
     rows = buildRows(chosen)
+    carry = forwardSellPrice(stop) if committed else None
     return {"start": start, "stop": stop, "minutes": minutes,
+            "carrySell": carry[0] if carry else None,
+            "carryIntervals": carry[1] if carry else 0,
             "rows": rows, "planned": len(chosen), "expected": expected,
             "firstRun": firstRun, "runsSeen": runsSeen,
             "committedRun": runTag, "committedCoverage": coverage,
@@ -396,11 +454,15 @@ def sectionMoney(d):
         print("   the plan said it could save          %+.2f EUR" % (baseCost - planCost))
         gap = closingSocGap(rows)
         if gap is not None and abs(gap[0]) > 50.0:
-            surplus, priceSell = gap
-            credit = surplus / 1000.0 * priceSell
-            print("   ...and closes %.2f kWh %s, worth %+.2f EUR at that interval's sell"
+            surplus, closingPrice = gap
+            price, basis = closingPrice, "that interval's sell price"
+            if d.get("carrySell") is not None:
+                price = d["carrySell"]
+                basis = "the mean sell price of the next %d h (%.3f)" % (CARRY_HOURS, price)
+            credit = carryValue(surplus, price)
+            print("   ...and closes %.2f kWh %s, worth %+.2f EUR at %s"
                   % (abs(surplus) / 1000.0,
-                     "richer" if surplus > 0 else "emptier", credit))
+                     "richer" if surplus > 0 else "emptier", credit, basis))
             print("   like for like, the plan was worth    %+.2f EUR" % (baseCost - planCost + credit))
     print()
     sectionBound(d, baseCost)
@@ -427,23 +489,29 @@ def sectionMoney(d):
 
 
 def sectionBound(d, baseCost):
-    """The in-force chain, printed as the upper bound it always was.
+    """The in-force chain, printed beside the committed plan as a diagnostic.
 
     Kept rather than deleted because it does measure something: what the optimiser promised
-    at each hour, given a battery it had not moved. That is a real diagnostic and a real
-    ceiling on the advice. It is not a plan, its euros cannot be earned, and until
-    2026-08-26 it was this report's headline.
+    at each hour, given a battery it had not moved. It is not a plan and its euros cannot be
+    earned - until 2026-08-26 it was this report's headline.
+
+    It is also not a bound, though it was labelled one for a day. On 2026-08-25 it read
+    +2.73 against the committed plan's +5.58, because the chain only ever takes each run's
+    OPENING move: conservative openings with the payoff in later hours produce a chain that
+    never reaches the payoff. The distance between the two lines has no reliable sign, which
+    is the whole reason it cannot stand in for either figure.
     """
     rolling = d.get("rollingRows")
     if not rolling or baseCost is None:
         return
     rollCost = sum(meterCost(r["planImport"], r["planExport"], r["priceBuy"], r["priceSell"])
                    for r in rolling)
-    print("   best-of-replans bound (diagnostic)   %+.2f EUR" % (baseCost - rollCost))
-    print("   Not achievable, and not an alternative headline: every run restarts from the")
-    print("   MEASURED SoC, so chaining their opening moves takes one move from every run of")
-    print("   the day, each believing the battery was still full. A gap to the line above is")
-    print("   the value of replanning that the battery never actually banked.")
+    print("   the replan chain would have said   %+.2f EUR" % (baseCost - rollCost))
+    print("   Not achievable, and not a bound in either direction. Every run restarts from the")
+    print("   MEASURED SoC, so the chain takes one opening move from each of the day's runs,")
+    print("   every one of them believing the battery was still full - and it never reaches")
+    print("   the later hours where a plan's payoff usually sits. It reads high or low with no")
+    print("   reliable sign. Kept because it is what this report published for months.")
     print()
 
 

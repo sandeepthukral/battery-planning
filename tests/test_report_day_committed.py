@@ -149,8 +149,9 @@ def test_section_checks_refuses_on_the_plan_side_only():
 
 # --- what section 1 says ------------------------------------------------------------------
 
-def _money(rows, rollingRows=None, run="2026-08-20T21:05:00Z"):
-    return {"rows": rows, "rollingRows": rollingRows, "committedRun": run}
+def _money(rows, rollingRows=None, run="2026-08-20T21:05:00Z", carrySell=None):
+    return {"rows": rows, "rollingRows": rollingRows, "committedRun": run,
+            "carrySell": carrySell}
 
 
 def test_the_saving_line_comes_from_the_committed_run_not_the_chain(capsys):
@@ -164,26 +165,27 @@ def test_the_saving_line_comes_from_the_committed_run_not_the_chain(capsys):
     out = capsys.readouterr().out
 
     said = next(l for l in out.splitlines() if "the plan said it could save" in l)
-    bound = next(l for l in out.splitlines() if "best-of-replans bound" in l)
+    bound = next(l for l in out.splitlines() if "the replan chain would have said" in l)
     assert float(said.split()[-2]) < float(bound.split()[-2])
     assert "Not achievable" in out
 
 
-def test_the_bound_is_labelled_a_diagnostic_and_never_a_saving(capsys):
+def test_the_chain_is_never_labelled_a_saving_or_a_bound(capsys):
     rows = [_row(0, planSoc=5000.0, actSoc=5000.0, actLoad=500.0),
             _row(1, planSoc=0.0, planExport=4000.0, actSoc=0.0, actLoad=500.0)]
     rd.sectionMoney(_money(rows, list(rows)))
     out = capsys.readouterr().out
-    assert "best-of-replans bound (diagnostic)" in out
+    assert "the replan chain would have said" in out
+    assert "not a bound in either direction" in out
     assert out.count("the plan said it could save") == 1
 
 
-def test_no_chain_no_bound_line(capsys):
+def test_no_chain_no_chain_line(capsys):
     """report_window.py shares collectWindow() and does not build the chain."""
     rows = [_row(0, planSoc=5000.0, actSoc=5000.0, actLoad=500.0),
             _row(1, planSoc=0.0, actSoc=0.0, actLoad=500.0)]
     rd.sectionMoney(_money(rows, None))
-    assert "best-of-replans" not in capsys.readouterr().out
+    assert "the replan chain" not in capsys.readouterr().out
 
 
 def test_a_plan_closing_richer_than_reality_is_credited_for_it(capsys):
@@ -194,7 +196,9 @@ def test_a_plan_closing_richer_than_reality_is_credited_for_it(capsys):
     rd.sectionMoney(_money(rows))
     out = capsys.readouterr().out
     credit = next(l for l in out.splitlines() if "closes" in l and "richer" in l)
-    assert "2.00 kWh richer" in credit and "+0.80 EUR" in credit
+    # 2 kWh at 0.40, less the one-way efficiency it costs to get back out of the battery.
+    assert "2.00 kWh richer" in credit and "+0.74 EUR" in credit
+    assert "that interval's sell price" in credit
     assert "like for like" in out
 
 
@@ -205,7 +209,9 @@ def test_a_plan_closing_emptier_than_reality_is_charged_for_it(capsys):
     rd.sectionMoney(_money(rows))
     out = capsys.readouterr().out
     credit = next(l for l in out.splitlines() if "closes" in l)
-    assert "2.00 kWh emptier" in credit and "-0.80 EUR" in credit
+    # Costs MORE than face, not less: replacing it means pushing it back through the
+    # same efficiency. A symmetric adjustment would flatter the plan that ran itself down.
+    assert "2.00 kWh emptier" in credit and "-0.86 EUR" in credit
 
 
 def test_no_credit_line_when_both_cases_close_together(capsys):
@@ -213,3 +219,32 @@ def test_no_credit_line_when_both_cases_close_together(capsys):
             _row(1, planSoc=20.0, actSoc=0.0, actLoad=500.0)]
     rd.sectionMoney(_money(rows))
     assert "richer" not in capsys.readouterr().out
+
+
+# --- what the carried energy is priced at -------------------------------------------------
+
+def test_the_carry_is_priced_forward_when_a_forward_price_exists(capsys):
+    """The closing interval can be the cheapest quarter-hour of the night. On 2026-08-25 the
+    plan closed 12.08 kWh emptier and that one price decided most of the verdict."""
+    rows = [_row(0, planSoc=5000.0, actSoc=5000.0, actLoad=500.0),
+            _row(1, planSoc=0.0, actSoc=2000.0, actLoad=500.0, priceSell=0.1)]
+    rd.sectionMoney(_money(rows, carrySell=0.30))
+    credit = next(l for l in capsys.readouterr().out.splitlines() if "closes" in l)
+    assert "mean sell price of the next 12 h (0.300)" in credit
+    assert "-0.65 EUR" in credit           # 2 kWh at 0.30, over the one-way efficiency
+
+
+def test_the_carry_falls_back_to_the_closing_price_and_says_which(capsys):
+    """A backfilled day can be scored before any plan exists for the day after it."""
+    rows = [_row(0, planSoc=5000.0, actSoc=5000.0, actLoad=500.0),
+            _row(1, planSoc=0.0, actSoc=2000.0, actLoad=500.0, priceSell=0.1)]
+    rd.sectionMoney(_money(rows, carrySell=None))
+    credit = next(l for l in capsys.readouterr().out.splitlines() if "closes" in l)
+    assert "that interval's sell price" in credit
+    assert "-0.22 EUR" in credit
+
+
+def test_energy_held_is_worth_less_than_face_and_energy_spent_costs_more():
+    """The efficiency is applied in the direction that costs the plan, both ways round."""
+    assert rd.carryValue(1000.0, 0.40) < 0.40
+    assert rd.carryValue(-1000.0, 0.40) < -0.40
