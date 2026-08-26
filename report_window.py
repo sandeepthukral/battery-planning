@@ -13,7 +13,8 @@ invisible in an hourly table and obvious in a quarter-hourly one.
 
 SECOND, and the reason this file exists at all: report_day.py scores each interval against
 the plan that was IN FORCE for it, which is right for judging advice and wrong for measuring
-drift. Eight to twelve plans are made a day, and every new run starts from the MEASURED SoC.
+drift. The planner runs hourly, so 24 plans are made a day, and every new run starts from
+the MEASURED SoC.
 So a gap that has been opening all evening is reset to zero by the next run, and the drift
 being investigated disappears into the seam between two plans. --run pins one stored run and
 follows it to the end of the window, which is what a person acting on that plan actually

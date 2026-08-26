@@ -17,14 +17,16 @@ its own self-consumption logic, so section 1 measures the distance between that 
 and the optimiser's advice. It does not measure how well the plan was followed, because it
 was not followed at all.
 
-Eight to twelve plans are made each day, and sections 1 and 2 judge the day against ONE of
-them: the latest run that already covered the window's first interval - the plan a follower
-would have woken up on. Not, as this report did until 2026-08-26, against whichever run was
-in force at each interval.
+The planner runs hourly at :55, so 24 plans are made each day - and a single day is covered
+by more stored runs than that, because the horizon reaches 36 hours forward and the previous
+afternoon's runs already have an opinion about it. 2026-08-21 had 34. Sections 1 and 2 judge
+the day against ONE of them: the latest run that already covered the window's first interval
+- the plan a follower would have woken up on. Not, as this report did until 2026-08-26,
+against whichever run was in force at each interval.
 
 That chain looked obviously right and was not. Every run restarts from the MEASURED SoC, so
-chaining the in-force slices sums the opening moves of a dozen plans, each believing it had
-a battery the previous one had not yet spent. On 2026-08-21 it produced a "plan" exporting
+chaining the in-force slices sums one opening move per run - two dozen of them - each
+believing it had a battery the previous one had not yet spent. On 2026-08-21 it produced a "plan" exporting
 25.02 kWh where no single run exceeded 14.15, discharging 29.38 kWh out of a 27.9 kWh
 battery, and claiming 7.54 EUR of advice against the 2.41 the committed plan actually
 offered - while the day itself earned 5.82. The headline was not just wrong, it pointed the
@@ -439,8 +441,8 @@ def sectionBound(d, baseCost):
                    for r in rolling)
     print("   best-of-replans bound (diagnostic)   %+.2f EUR" % (baseCost - rollCost))
     print("   Not achievable, and not an alternative headline: every run restarts from the")
-    print("   MEASURED SoC, so chaining their opening moves sums a dozen plans that each")
-    print("   believed the battery was still full. A gap between this and the line above is")
+    print("   MEASURED SoC, so chaining their opening moves takes one move from every run of")
+    print("   the day, each believing the battery was still full. A gap to the line above is")
     print("   the value of replanning that the battery never actually banked.")
     print()
 

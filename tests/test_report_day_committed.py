@@ -2,8 +2,8 @@
 
 The bug these cover shipped working, looked right, and was wrong by 12 kWh. report_day.py
 scored each interval against the run in force for it; every run restarts from the measured
-SoC; so the chain summed the opening moves of a dozen plans that each believed the battery
-was still full. On 2026-08-21 it published "the plan said it could save 7.54 EUR" for a day
+SoC; so the chain summed one opening move from each of the day's 24 runs, every one of them
+believing the battery was still full. On 2026-08-21 it published "the plan said it could save 7.54 EUR" for a day
 whose committed plan offered 2.41 and whose battery earned 5.82.
 
 Rows are hand-built, same style as test_report_day_forecast.py: nothing here needs a
