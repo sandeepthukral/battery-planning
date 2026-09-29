@@ -9,6 +9,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import influx_source as ix
 
@@ -89,3 +91,127 @@ def test_profile_excludes_todays_partial_data(monkeypatch):
     now = datetime.now(ix.LOCAL_TZ) if ix.LOCAL_TZ else datetime.now(timezone.utc)
     assert captured["stop"].date() == now.date()
     assert captured["stop"] <= now
+
+
+
+NOW = datetime(2026, 9, 29, 14, 0, tzinfo=timezone.utc)
+
+
+def _row(value, minutes_ago):
+    t = (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return [{"_time": t, "_value": str(value)}]
+
+
+@pytest.fixture
+def soc_sources(monkeypatch):
+    """Point `_query` at canned rows per (measurement, field); returns the Flux it was sent."""
+    monkeypatch.setenv("INFLUX_ENV_FILE", "/nonexistent/.env")
+    monkeypatch.setenv("ALPHAESS_SYS_SN", "SN-TEST")
+    ix.resetConfig()
+    sent = []
+
+    def install(cloud_rows, modbus_rows):
+        answers = {(ix.MEASUREMENT, ix.FIELD_SOC): cloud_rows,
+                   (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): modbus_rows}
+
+        def fake(flux):
+            sent.append(flux)
+            for (measurement, field), rows in answers.items():
+                if '"%s"' % measurement in flux and '"%s"' % field in flux:
+                    if isinstance(rows, Exception):
+                        raise rows
+                    return rows
+            raise AssertionError("unexpected query: %s" % flux)
+        monkeypatch.setattr(ix, "_query", fake)
+        return sent
+    yield install
+    ix.resetConfig()
+
+
+def test_a_fresh_cloud_reading_wins_without_asking_the_dispatcher(soc_sources):
+    sent = soc_sources(_row(55.2, 1), _row(54.8, 0))
+    assert ix.latestSocPercent(now=NOW) == 55.2
+    assert len(sent) == 1
+
+
+def test_falls_back_to_the_dispatcher_when_the_cloud_is_silent(soc_sources):
+    """2026-09-29: the AlphaESS API down, `power_readings` empty, the planner refusing to plan
+    while the dispatcher read the inverter's SoC every minute."""
+    soc_sources([], _row(54.8, 1))
+    assert ix.latestSocPercent(now=NOW) == 54.8
+
+
+def test_a_stale_cloud_reading_loses_to_a_fresher_dispatcher_one(soc_sources):
+    """The start of an outage: the last cloud sample is still inside the 30-minute window,
+    but a battery charging at ~5 kW has moved ~2 kWh since."""
+    soc_sources(_row(40.0, 25), _row(47.5, 1))
+    assert ix.latestSocPercent(now=NOW) == 47.5
+
+
+def test_a_stale_cloud_reading_still_beats_an_older_dispatcher_one(soc_sources):
+    soc_sources(_row(40.0, 10), _row(38.0, 20))
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_a_stale_cloud_reading_is_used_when_the_dispatcher_is_silent(soc_sources):
+    soc_sources(_row(40.0, 10), [])
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_none_when_both_are_silent(soc_sources):
+    soc_sources([], [])
+    assert ix.latestSocPercent(now=NOW) is None
+
+
+def test_both_queries_carry_the_sys_sn_filter_and_the_same_window(soc_sources):
+    sent = soc_sources([], _row(54.8, 1))
+    ix.latestSocPercent(within_minutes=30, now=NOW)
+    assert len(sent) == 2
+    for flux in sent:
+        assert 'r.sys_sn == "SN-TEST"' in flux
+        assert "range(start: -30m)" in flux
+
+
+
+def test_exactly_at_the_freshness_limit_the_cloud_still_wins_alone(soc_sources):
+    sent = soc_sources(_row(55.2, ix.CLOUD_SOC_FRESH_MINUTES), _row(54.8, 0))
+    assert ix.latestSocPercent(now=NOW) == 55.2
+    assert len(sent) == 1
+
+
+def test_a_tie_between_stale_cloud_and_dispatcher_goes_to_the_cloud(soc_sources):
+    soc_sources(_row(40.0, 10), _row(38.0, 10))
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_a_failed_dispatcher_query_falls_back_to_a_stale_cloud_value(soc_sources):
+    """The dispatcher query only runs once the cloud value has gone stale; refusing to plan
+    over its failure would be worse than a few-minutes-old SoC."""
+    soc_sources(_row(40.0, 10), RuntimeError("HTTP 503"))
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_a_failed_dispatcher_query_with_no_cloud_value_still_raises(soc_sources):
+    soc_sources([], RuntimeError("HTTP 503"))
+    with pytest.raises(RuntimeError):
+        ix.latestSocPercent(now=NOW)
+
+
+def test_a_soc_outside_0_to_100_is_ignored(soc_sources):
+    """0xFFFF / 10 = 6553.5 % would otherwise become the plan's starting charge."""
+    soc_sources(_row(6553.5, 1), _row(54.8, 1))
+    assert ix.latestSocPercent(now=NOW) == 54.8
+
+
+def test_a_naive_now_is_taken_as_utc(soc_sources):
+    soc_sources(_row(55.2, 1), [])
+    assert ix.latestSocPercent(now=NOW.replace(tzinfo=None)) == 55.2
+
+
+def test_the_freshness_limit_scales_with_a_slower_collector(soc_sources, monkeypatch):
+    """Ten polls at 60 s is ten minutes: an 8-minute-old sample is not stale for it."""
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "60")
+    ix.resetConfig()
+    sent = soc_sources(_row(55.2, 8), _row(54.8, 0))
+    assert ix.latestSocPercent(now=NOW) == 55.2
+    assert len(sent) == 1

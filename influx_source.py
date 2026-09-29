@@ -78,6 +78,11 @@ FIELD_SOC = "soc_percent"
 FIELD_BATTERY = "battery_power_w"
 FIELD_GRID = "grid_power_w"
 
+# The dispatcher's own Modbus reading of the same battery, in the same bucket - see
+# `latestSocPercent`. alphaess-collector, dispatch/state.py.
+DISPATCH_MEASUREMENT = "dispatch_state"
+DISPATCH_FIELD_SOC = "soc_pct"
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 # This repo's own .env: the primary place for connection settings, and the only one that
@@ -322,19 +327,94 @@ def _parse_time(value):
     return datetime.fromisoformat(v)
 
 
-def latestSocPercent(within_minutes=30):
-    """Most recent state of charge in percent, or None if nothing recent enough."""
+def _latestSample(measurement, field, within_minutes):
+    """Newest (time, value) of `field` in `measurement` over the last `within_minutes`, or None.
+
+    None too for a row without a parseable `_time` (a `last()` always carries one, so that is a
+    malformed reply, not a sample) and for a value outside 0-100 %: every caller is a SoC, and
+    a register decoded wrong - 0xFFFF / 10 is 6553.5 % - would otherwise become the plan's
+    starting charge, since nothing downstream clamps it.
+    """
     flux = '''from(bucket: "%s")
   |> range(start: -%dm)
   |> filter(fn: (r) => r._measurement == "%s" and r._field == "%s")%s
-  |> last()''' % (config()["bucket"], int(within_minutes), MEASUREMENT, FIELD_SOC, _sys_filter())
+  |> last()''' % (config()["bucket"], int(within_minutes), measurement, field, _sys_filter())
     rows = _query(flux)
     if not rows:
         return None
     try:
-        return float(rows[-1]["_value"])
-    except (KeyError, ValueError):
+        value = float(rows[-1]["_value"])
+        when = _parse_time(rows[-1]["_time"])
+    except (KeyError, ValueError, AttributeError, TypeError):
         return None
+    if not 0.0 <= value <= 100.0:
+        print("WARNING: ignoring %s.%s = %s - not a percentage" % (measurement, field, value))
+        return None
+    return when, value
+
+
+# How old the collector's SoC may be and still be taken without asking the dispatcher: the
+# larger of five minutes and ten of its polls. At the default 30 s poll that is five minutes -
+# fresh enough that the battery cannot have moved meaningfully (5 kW for 5 min is ~1.5 % of
+# 27.9 kWh), and stale enough that one slow poll does not trigger a second query. Scaled with
+# POLL_INTERVAL_SECONDS so a slower collector is not judged stale between its own polls.
+CLOUD_SOC_FRESH_MINUTES = 5
+CLOUD_SOC_FRESH_POLLS = 10
+
+
+def _cloudFreshFor():
+    return timedelta(seconds=max(CLOUD_SOC_FRESH_MINUTES * 60,
+                                 CLOUD_SOC_FRESH_POLLS * config()["poll_seconds"]))
+
+
+def latestSocPercent(within_minutes=30, now=None):
+    """Most recent state of charge in percent, or None if nothing recent enough.
+
+    The collector's cloud reading while it is fresh, else the newer of it and the dispatcher's
+    own Modbus reading of the same inverter. The collector polls the AlphaESS cloud, and when
+    that API went down (2026-09-29) this returned None and the planner refused to plan - while
+    the dispatcher was reading SoC from the inverter every minute and publishing it as
+    `dispatch_state.soc_pct` in the same bucket. Without a plan the dispatcher falls back to
+    self-consumption within two hours, so a cloud outage cost every arbitrage it lasted for.
+
+    THE CLOUD FIRST WHILE FRESH (`_cloudFreshFor`): in normal running it is the reading every
+    backtest and report here was built on. NOT MERELY "PRESENT": at the start of an outage the
+    last cloud sample stays inside the 30-minute window for up to 29 minutes, and at ~5 kW of
+    charge that is up to ~2 kWh behind a dispatcher reading from a minute ago. Past the
+    freshness limit the newer of the two wins; a tie goes to the cloud. Same window and sys_sn
+    filter for both, so a dead dispatcher is not a stale answer either.
+
+    A FAILED DISPATCHER QUERY IS NOT A FAILED PLAN when a cloud value is in hand: it only runs
+    once the cloud reading has gone stale, and refusing to plan over it would be worse than
+    planning from a few-minutes-old SoC. With no cloud value it still raises, as before.
+
+    `now` is for tests; a naive one is taken as UTC.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cloud = _latestSample(MEASUREMENT, FIELD_SOC, within_minutes)
+    if cloud is not None and now - cloud[0] <= _cloudFreshFor():
+        return cloud[1]
+    try:
+        modbus = _latestSample(DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, within_minutes)
+    except Exception as e:
+        if cloud is None:
+            raise
+        print("NOTE: cannot read %s.%s (%s) - using the stale %s.%s"
+              % (DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, e, MEASUREMENT, FIELD_SOC))
+        return cloud[1]
+    if modbus is not None and (cloud is None or modbus[0] > cloud[0]):
+        print("NOTE: %s.%s is %s - using the dispatcher's Modbus reading %s.%s"
+              % (MEASUREMENT, FIELD_SOC,
+                 "missing" if cloud is None else "stale and older than it",
+                 DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC))
+        return modbus[1]
+    if cloud is not None:
+        print("NOTE: using a %s.%s %d min old - the dispatcher has nothing newer"
+              % (MEASUREMENT, FIELD_SOC, (now - cloud[0]).total_seconds() // 60))
+        return cloud[1]
+    return None
 
 
 def _rangeClause(start, stop):
@@ -525,7 +605,9 @@ def _selftest():
         return 1
 
     soc = latestSocPercent()
-    print("latest soc_percent: %s" % ("%.1f %%" % soc if soc is not None else "no sample in the last 30 min"))
+    print("latest SoC (%s.%s, else %s.%s): %s" % (
+        MEASUREMENT, FIELD_SOC, DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC,
+        "%.1f %%" % soc if soc is not None else "no sample in the last 30 min"))
 
     profile, ndays = hourlyAvgProfileWh(FIELD_LOAD, days=7)
     print("\n7-day mean hourly LOAD (Wh), from %d day(s) of samples:" % ndays)
