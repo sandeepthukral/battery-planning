@@ -118,6 +118,8 @@ def soc_sources(monkeypatch):
             sent.append(flux)
             for (measurement, field), rows in answers.items():
                 if '"%s"' % measurement in flux and '"%s"' % field in flux:
+                    if isinstance(rows, Exception):
+                        raise rows
                     return rows
             raise AssertionError("unexpected query: %s" % flux)
         monkeypatch.setattr(ix, "_query", fake)
@@ -168,3 +170,48 @@ def test_both_queries_carry_the_sys_sn_filter_and_the_same_window(soc_sources):
     for flux in sent:
         assert 'r.sys_sn == "SN-TEST"' in flux
         assert "range(start: -30m)" in flux
+
+
+
+def test_exactly_at_the_freshness_limit_the_cloud_still_wins_alone(soc_sources):
+    sent = soc_sources(_row(55.2, ix.CLOUD_SOC_FRESH_MINUTES), _row(54.8, 0))
+    assert ix.latestSocPercent(now=NOW) == 55.2
+    assert len(sent) == 1
+
+
+def test_a_tie_between_stale_cloud_and_dispatcher_goes_to_the_cloud(soc_sources):
+    soc_sources(_row(40.0, 10), _row(38.0, 10))
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_a_failed_dispatcher_query_falls_back_to_a_stale_cloud_value(soc_sources):
+    """The dispatcher query only runs once the cloud value has gone stale; refusing to plan
+    over its failure would be worse than a few-minutes-old SoC."""
+    soc_sources(_row(40.0, 10), RuntimeError("HTTP 503"))
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_a_failed_dispatcher_query_with_no_cloud_value_still_raises(soc_sources):
+    soc_sources([], RuntimeError("HTTP 503"))
+    with pytest.raises(RuntimeError):
+        ix.latestSocPercent(now=NOW)
+
+
+def test_a_soc_outside_0_to_100_is_ignored(soc_sources):
+    """0xFFFF / 10 = 6553.5 % would otherwise become the plan's starting charge."""
+    soc_sources(_row(6553.5, 1), _row(54.8, 1))
+    assert ix.latestSocPercent(now=NOW) == 54.8
+
+
+def test_a_naive_now_is_taken_as_utc(soc_sources):
+    soc_sources(_row(55.2, 1), [])
+    assert ix.latestSocPercent(now=NOW.replace(tzinfo=None)) == 55.2
+
+
+def test_the_freshness_limit_scales_with_a_slower_collector(soc_sources, monkeypatch):
+    """Ten polls at 60 s is ten minutes: an 8-minute-old sample is not stale for it."""
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "60")
+    ix.resetConfig()
+    sent = soc_sources(_row(55.2, 8), _row(54.8, 0))
+    assert ix.latestSocPercent(now=NOW) == 55.2
+    assert len(sent) == 1

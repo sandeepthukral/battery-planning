@@ -330,8 +330,10 @@ def _parse_time(value):
 def _latestSample(measurement, field, within_minutes):
     """Newest (time, value) of `field` in `measurement` over the last `within_minutes`, or None.
 
-    `time` is an aware datetime, or None if the row carried no parseable `_time` - which a
-    `last()` always does, so None only ranks the sample as oldest rather than dropping it.
+    None too for a row without a parseable `_time` (a `last()` always carries one, so that is a
+    malformed reply, not a sample) and for a value outside 0-100 %: every caller is a SoC, and
+    a register decoded wrong - 0xFFFF / 10 is 6553.5 % - would otherwise become the plan's
+    starting charge, since nothing downstream clamps it.
     """
     flux = '''from(bucket: "%s")
   |> range(start: -%dm)
@@ -342,19 +344,27 @@ def _latestSample(measurement, field, within_minutes):
         return None
     try:
         value = float(rows[-1]["_value"])
-    except (KeyError, ValueError):
-        return None
-    try:
         when = _parse_time(rows[-1]["_time"])
-    except (KeyError, ValueError, AttributeError):
-        when = None
+    except (KeyError, ValueError, AttributeError, TypeError):
+        return None
+    if not 0.0 <= value <= 100.0:
+        print("WARNING: ignoring %s.%s = %s - not a percentage" % (measurement, field, value))
+        return None
     return when, value
 
 
-# How old the collector's SoC may be and still be taken without asking the dispatcher. Ten of
-# its 30 s polls: fresh enough that the battery cannot have moved meaningfully (5 kW for 5 min
-# is ~1.5 % of 27.9 kWh), and stale enough that one slow poll does not trigger a second query.
+# How old the collector's SoC may be and still be taken without asking the dispatcher: the
+# larger of five minutes and ten of its polls. At the default 30 s poll that is five minutes -
+# fresh enough that the battery cannot have moved meaningfully (5 kW for 5 min is ~1.5 % of
+# 27.9 kWh), and stale enough that one slow poll does not trigger a second query. Scaled with
+# POLL_INTERVAL_SECONDS so a slower collector is not judged stale between its own polls.
 CLOUD_SOC_FRESH_MINUTES = 5
+CLOUD_SOC_FRESH_POLLS = 10
+
+
+def _cloudFreshFor():
+    return timedelta(seconds=max(CLOUD_SOC_FRESH_MINUTES * 60,
+                                 CLOUD_SOC_FRESH_POLLS * config()["poll_seconds"]))
 
 
 def latestSocPercent(within_minutes=30, now=None):
@@ -367,30 +377,44 @@ def latestSocPercent(within_minutes=30, now=None):
     `dispatch_state.soc_pct` in the same bucket. Without a plan the dispatcher falls back to
     self-consumption within two hours, so a cloud outage cost every arbitrage it lasted for.
 
-    THE CLOUD FIRST WHILE FRESH: in normal running it is the reading every backtest and report
-    here was built on. NOT MERELY "PRESENT": at the start of an outage the last cloud sample
-    stays inside the 30-minute window for up to 29 minutes, and at ~5 kW of charge that is up
-    to ~2 kWh behind a dispatcher reading from a minute ago. Past CLOUD_SOC_FRESH_MINUTES the
-    newer of the two wins. Same window and sys_sn filter for both, so a dead dispatcher is not
-    a stale answer either.
+    THE CLOUD FIRST WHILE FRESH (`_cloudFreshFor`): in normal running it is the reading every
+    backtest and report here was built on. NOT MERELY "PRESENT": at the start of an outage the
+    last cloud sample stays inside the 30-minute window for up to 29 minutes, and at ~5 kW of
+    charge that is up to ~2 kWh behind a dispatcher reading from a minute ago. Past the
+    freshness limit the newer of the two wins; a tie goes to the cloud. Same window and sys_sn
+    filter for both, so a dead dispatcher is not a stale answer either.
+
+    A FAILED DISPATCHER QUERY IS NOT A FAILED PLAN when a cloud value is in hand: it only runs
+    once the cloud reading has gone stale, and refusing to plan over it would be worse than
+    planning from a few-minutes-old SoC. With no cloud value it still raises, as before.
+
+    `now` is for tests; a naive one is taken as UTC.
     """
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     cloud = _latestSample(MEASUREMENT, FIELD_SOC, within_minutes)
-    if cloud is not None and cloud[0] is not None \
-            and now - cloud[0] <= timedelta(minutes=CLOUD_SOC_FRESH_MINUTES):
+    if cloud is not None and now - cloud[0] <= _cloudFreshFor():
         return cloud[1]
-    modbus = _latestSample(DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, within_minutes)
-    candidates = [c for c in (cloud, modbus) if c is not None]
-    if not candidates:
-        return None
-    oldest = datetime.min.replace(tzinfo=timezone.utc)
-    newest = max(candidates, key=lambda c: c[0] or oldest)
-    if newest is modbus:
+    try:
+        modbus = _latestSample(DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, within_minutes)
+    except Exception as e:
+        if cloud is None:
+            raise
+        print("NOTE: cannot read %s.%s (%s) - using the stale %s.%s"
+              % (DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, e, MEASUREMENT, FIELD_SOC))
+        return cloud[1]
+    if modbus is not None and (cloud is None or modbus[0] > cloud[0]):
         print("NOTE: %s.%s is %s - using the dispatcher's Modbus reading %s.%s"
               % (MEASUREMENT, FIELD_SOC,
-                 "missing" if cloud is None else "older than %d min" % CLOUD_SOC_FRESH_MINUTES,
+                 "missing" if cloud is None else "stale and older than it",
                  DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC))
-    return newest[1]
+        return modbus[1]
+    if cloud is not None:
+        print("NOTE: using a %s.%s %d min old - the dispatcher has nothing newer"
+              % (MEASUREMENT, FIELD_SOC, (now - cloud[0]).total_seconds() // 60))
+        return cloud[1]
+    return None
 
 
 def _rangeClause(start, stop):

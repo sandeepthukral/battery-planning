@@ -112,7 +112,8 @@ The planner reads from `alphaess` on every single run:
 
 | field | used for |
 |---|---|
-| `soc_percent` | the starting SoC — the plan is built from it and **refuses to run without it** |
+| `soc_percent` | the starting SoC — the plan is built from it and **refuses to run without it**, unless `dispatch_state.soc_pct` (below) has one |
+| `dispatch_state.soc_pct` | fallback starting SoC, read over Modbus by alphaess-collector's dispatcher: used when `soc_percent` is missing or more than 5 minutes old and this one is newer (`influx_source.latestSocPercent`). Keeps planning alive through an AlphaESS cloud outage |
 | `load_power_w` | the 7-day load profile; this is the *only* load forecast that exists |
 | `pv_power_w` | PV forecast calibration |
 | `battery_power_w`, `grid_power_w` | plan-vs-actual comparison |

@@ -54,6 +54,16 @@ experiment against the live database.
 Create a token scoped `r alphaess, rw planning`, put it in `.env` as
 `INFLUX_TOKEN_PLANNING`, and delete `INFLUX_TOKEN`. Verify with `python3 influx_source.py`.
 
+### A frozen cloud SoC beats the dispatcher's live one
+
+`latestSocPercent()` trusts `power_readings.soc_percent` outright while its `_time` is at most
+5 minutes old, but the collector stamps that point at POLL time. A cloud that keeps answering
+with a stale body therefore looks fresh forever, and the planner starts from the wrong charge
+while `dispatch_state.soc_pct` holds the real one. Tracked, with the fix options, as
+alphaess-collector `TODO.md` item 19 -- the root fix is on the collector side. The planner-side
+part: a test for "cloud fresh by `_time` but disagreeing with the dispatcher", and recording on
+the plan which source the starting SoC came from (deferred from the same review).
+
 ### `influxProfileDays=7` returns 8 days
 
 The load profile asks for 7 days of history and gets 8. An off-by-one in the range, almost
