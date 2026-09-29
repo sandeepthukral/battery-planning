@@ -9,6 +9,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import influx_source as ix
 
@@ -91,43 +93,78 @@ def test_profile_excludes_todays_partial_data(monkeypatch):
     assert captured["stop"] <= now
 
 
-def _fake_query(answers, seen):
-    """A `_query` stand-in: the first (measurement, field) pair named in the Flux picks the
-    rows returned."""
-    def fake(flux):
-        for (measurement, field), rows in answers.items():
-            if '"%s"' % measurement in flux and '"%s"' % field in flux:
-                seen.append(measurement)
-                return rows
-        raise AssertionError("unexpected query: %s" % flux)
-    return fake
+
+NOW = datetime(2026, 9, 29, 14, 0, tzinfo=timezone.utc)
 
 
-def test_latest_soc_prefers_the_collectors_reading(monkeypatch):
-    seen = []
-    monkeypatch.setattr(ix, "_query", _fake_query({
-        (ix.MEASUREMENT, ix.FIELD_SOC): [{"_value": "55.2"}],
-        (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): [{"_value": "54.8"}],
-    }, seen))
-    assert ix.latestSocPercent() == 55.2
-    assert seen == [ix.MEASUREMENT]
+def _row(value, minutes_ago):
+    t = (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return [{"_time": t, "_value": str(value)}]
 
 
-def test_latest_soc_falls_back_to_the_dispatcher_when_the_cloud_is_silent(monkeypatch):
+@pytest.fixture
+def soc_sources(monkeypatch):
+    """Point `_query` at canned rows per (measurement, field); returns the Flux it was sent."""
+    monkeypatch.setenv("INFLUX_ENV_FILE", "/nonexistent/.env")
+    monkeypatch.setenv("ALPHAESS_SYS_SN", "SN-TEST")
+    ix.resetConfig()
+    sent = []
+
+    def install(cloud_rows, modbus_rows):
+        answers = {(ix.MEASUREMENT, ix.FIELD_SOC): cloud_rows,
+                   (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): modbus_rows}
+
+        def fake(flux):
+            sent.append(flux)
+            for (measurement, field), rows in answers.items():
+                if '"%s"' % measurement in flux and '"%s"' % field in flux:
+                    return rows
+            raise AssertionError("unexpected query: %s" % flux)
+        monkeypatch.setattr(ix, "_query", fake)
+        return sent
+    yield install
+    ix.resetConfig()
+
+
+def test_a_fresh_cloud_reading_wins_without_asking_the_dispatcher(soc_sources):
+    sent = soc_sources(_row(55.2, 1), _row(54.8, 0))
+    assert ix.latestSocPercent(now=NOW) == 55.2
+    assert len(sent) == 1
+
+
+def test_falls_back_to_the_dispatcher_when_the_cloud_is_silent(soc_sources):
     """2026-09-29: the AlphaESS API down, `power_readings` empty, the planner refusing to plan
     while the dispatcher read the inverter's SoC every minute."""
-    seen = []
-    monkeypatch.setattr(ix, "_query", _fake_query({
-        (ix.MEASUREMENT, ix.FIELD_SOC): [],
-        (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): [{"_value": "54.8"}],
-    }, seen))
-    assert ix.latestSocPercent() == 54.8
-    assert seen == [ix.MEASUREMENT, ix.DISPATCH_MEASUREMENT]
+    soc_sources([], _row(54.8, 1))
+    assert ix.latestSocPercent(now=NOW) == 54.8
 
 
-def test_latest_soc_is_none_when_both_are_silent(monkeypatch):
-    monkeypatch.setattr(ix, "_query", _fake_query({
-        (ix.MEASUREMENT, ix.FIELD_SOC): [],
-        (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): [],
-    }, []))
-    assert ix.latestSocPercent() is None
+def test_a_stale_cloud_reading_loses_to_a_fresher_dispatcher_one(soc_sources):
+    """The start of an outage: the last cloud sample is still inside the 30-minute window,
+    but a battery charging at ~5 kW has moved ~2 kWh since."""
+    soc_sources(_row(40.0, 25), _row(47.5, 1))
+    assert ix.latestSocPercent(now=NOW) == 47.5
+
+
+def test_a_stale_cloud_reading_still_beats_an_older_dispatcher_one(soc_sources):
+    soc_sources(_row(40.0, 10), _row(38.0, 20))
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_a_stale_cloud_reading_is_used_when_the_dispatcher_is_silent(soc_sources):
+    soc_sources(_row(40.0, 10), [])
+    assert ix.latestSocPercent(now=NOW) == 40.0
+
+
+def test_none_when_both_are_silent(soc_sources):
+    soc_sources([], [])
+    assert ix.latestSocPercent(now=NOW) is None
+
+
+def test_both_queries_carry_the_sys_sn_filter_and_the_same_window(soc_sources):
+    sent = soc_sources([], _row(54.8, 1))
+    ix.latestSocPercent(within_minutes=30, now=NOW)
+    assert len(sent) == 2
+    for flux in sent:
+        assert 'r.sys_sn == "SN-TEST"' in flux
+        assert "range(start: -30m)" in flux

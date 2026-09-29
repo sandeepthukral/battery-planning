@@ -327,8 +327,12 @@ def _parse_time(value):
     return datetime.fromisoformat(v)
 
 
-def _latestValue(measurement, field, within_minutes):
-    """Newest `field` of `measurement` in the last `within_minutes`, or None."""
+def _latestSample(measurement, field, within_minutes):
+    """Newest (time, value) of `field` in `measurement` over the last `within_minutes`, or None.
+
+    `time` is an aware datetime, or None if the row carried no parseable `_time` - which a
+    `last()` always does, so None only ranks the sample as oldest rather than dropping it.
+    """
     flux = '''from(bucket: "%s")
   |> range(start: -%dm)
   |> filter(fn: (r) => r._measurement == "%s" and r._field == "%s")%s
@@ -337,33 +341,56 @@ def _latestValue(measurement, field, within_minutes):
     if not rows:
         return None
     try:
-        return float(rows[-1]["_value"])
+        value = float(rows[-1]["_value"])
     except (KeyError, ValueError):
         return None
+    try:
+        when = _parse_time(rows[-1]["_time"])
+    except (KeyError, ValueError, AttributeError):
+        when = None
+    return when, value
 
 
-def latestSocPercent(within_minutes=30):
+# How old the collector's SoC may be and still be taken without asking the dispatcher. Ten of
+# its 30 s polls: fresh enough that the battery cannot have moved meaningfully (5 kW for 5 min
+# is ~1.5 % of 27.9 kWh), and stale enough that one slow poll does not trigger a second query.
+CLOUD_SOC_FRESH_MINUTES = 5
+
+
+def latestSocPercent(within_minutes=30, now=None):
     """Most recent state of charge in percent, or None if nothing recent enough.
 
-    The collector's cloud reading first, then the dispatcher's own Modbus reading of the same
-    inverter. The collector polls the AlphaESS cloud, and when that API went down (2026-09-29)
-    this returned None and the planner refused to plan - while the dispatcher was reading SoC
-    from the inverter every minute and publishing it as `dispatch_state.soc_pct` in the same
-    bucket. Without a plan the dispatcher falls back to self-consumption within two hours,
-    so a cloud outage cost every arbitrage it lasted for.
+    The collector's cloud reading while it is fresh, else the newer of it and the dispatcher's
+    own Modbus reading of the same inverter. The collector polls the AlphaESS cloud, and when
+    that API went down (2026-09-29) this returned None and the planner refused to plan - while
+    the dispatcher was reading SoC from the inverter every minute and publishing it as
+    `dispatch_state.soc_pct` in the same bucket. Without a plan the dispatcher falls back to
+    self-consumption within two hours, so a cloud outage cost every arbitrage it lasted for.
 
-    A fallback rather than "newest of the two": in normal running both are fresh and the cloud
-    reading is the one every backtest and report here was built on. Same freshness window for
-    both, so a dead dispatcher is not a stale answer either.
+    THE CLOUD FIRST WHILE FRESH: in normal running it is the reading every backtest and report
+    here was built on. NOT MERELY "PRESENT": at the start of an outage the last cloud sample
+    stays inside the 30-minute window for up to 29 minutes, and at ~5 kW of charge that is up
+    to ~2 kWh behind a dispatcher reading from a minute ago. Past CLOUD_SOC_FRESH_MINUTES the
+    newer of the two wins. Same window and sys_sn filter for both, so a dead dispatcher is not
+    a stale answer either.
     """
-    soc = _latestValue(MEASUREMENT, FIELD_SOC, within_minutes)
-    if soc is not None:
-        return soc
-    soc = _latestValue(DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, within_minutes)
-    if soc is not None:
-        print("NOTE: no recent %s.%s - using the dispatcher's Modbus reading %s.%s"
-              % (MEASUREMENT, FIELD_SOC, DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC))
-    return soc
+    now = now or datetime.now(timezone.utc)
+    cloud = _latestSample(MEASUREMENT, FIELD_SOC, within_minutes)
+    if cloud is not None and cloud[0] is not None \
+            and now - cloud[0] <= timedelta(minutes=CLOUD_SOC_FRESH_MINUTES):
+        return cloud[1]
+    modbus = _latestSample(DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, within_minutes)
+    candidates = [c for c in (cloud, modbus) if c is not None]
+    if not candidates:
+        return None
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    newest = max(candidates, key=lambda c: c[0] or oldest)
+    if newest is modbus:
+        print("NOTE: %s.%s is %s - using the dispatcher's Modbus reading %s.%s"
+              % (MEASUREMENT, FIELD_SOC,
+                 "missing" if cloud is None else "older than %d min" % CLOUD_SOC_FRESH_MINUTES,
+                 DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC))
+    return newest[1]
 
 
 def _rangeClause(start, stop):
@@ -554,7 +581,9 @@ def _selftest():
         return 1
 
     soc = latestSocPercent()
-    print("latest soc_percent: %s" % ("%.1f %%" % soc if soc is not None else "no sample in the last 30 min"))
+    print("latest SoC (%s.%s, else %s.%s): %s" % (
+        MEASUREMENT, FIELD_SOC, DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC,
+        "%.1f %%" % soc if soc is not None else "no sample in the last 30 min"))
 
     profile, ndays = hourlyAvgProfileWh(FIELD_LOAD, days=7)
     print("\n7-day mean hourly LOAD (Wh), from %d day(s) of samples:" % ndays)
