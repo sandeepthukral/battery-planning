@@ -89,3 +89,45 @@ def test_profile_excludes_todays_partial_data(monkeypatch):
     now = datetime.now(ix.LOCAL_TZ) if ix.LOCAL_TZ else datetime.now(timezone.utc)
     assert captured["stop"].date() == now.date()
     assert captured["stop"] <= now
+
+
+def _fake_query(answers, seen):
+    """A `_query` stand-in: the first (measurement, field) pair named in the Flux picks the
+    rows returned."""
+    def fake(flux):
+        for (measurement, field), rows in answers.items():
+            if '"%s"' % measurement in flux and '"%s"' % field in flux:
+                seen.append(measurement)
+                return rows
+        raise AssertionError("unexpected query: %s" % flux)
+    return fake
+
+
+def test_latest_soc_prefers_the_collectors_reading(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ix, "_query", _fake_query({
+        (ix.MEASUREMENT, ix.FIELD_SOC): [{"_value": "55.2"}],
+        (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): [{"_value": "54.8"}],
+    }, seen))
+    assert ix.latestSocPercent() == 55.2
+    assert seen == [ix.MEASUREMENT]
+
+
+def test_latest_soc_falls_back_to_the_dispatcher_when_the_cloud_is_silent(monkeypatch):
+    """2026-09-29: the AlphaESS API down, `power_readings` empty, the planner refusing to plan
+    while the dispatcher read the inverter's SoC every minute."""
+    seen = []
+    monkeypatch.setattr(ix, "_query", _fake_query({
+        (ix.MEASUREMENT, ix.FIELD_SOC): [],
+        (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): [{"_value": "54.8"}],
+    }, seen))
+    assert ix.latestSocPercent() == 54.8
+    assert seen == [ix.MEASUREMENT, ix.DISPATCH_MEASUREMENT]
+
+
+def test_latest_soc_is_none_when_both_are_silent(monkeypatch):
+    monkeypatch.setattr(ix, "_query", _fake_query({
+        (ix.MEASUREMENT, ix.FIELD_SOC): [],
+        (ix.DISPATCH_MEASUREMENT, ix.DISPATCH_FIELD_SOC): [],
+    }, []))
+    assert ix.latestSocPercent() is None

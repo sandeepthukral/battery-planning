@@ -78,6 +78,11 @@ FIELD_SOC = "soc_percent"
 FIELD_BATTERY = "battery_power_w"
 FIELD_GRID = "grid_power_w"
 
+# The dispatcher's own Modbus reading of the same battery, in the same bucket - see
+# `latestSocPercent`. alphaess-collector, dispatch/state.py.
+DISPATCH_MEASUREMENT = "dispatch_state"
+DISPATCH_FIELD_SOC = "soc_pct"
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 # This repo's own .env: the primary place for connection settings, and the only one that
@@ -322,12 +327,12 @@ def _parse_time(value):
     return datetime.fromisoformat(v)
 
 
-def latestSocPercent(within_minutes=30):
-    """Most recent state of charge in percent, or None if nothing recent enough."""
+def _latestValue(measurement, field, within_minutes):
+    """Newest `field` of `measurement` in the last `within_minutes`, or None."""
     flux = '''from(bucket: "%s")
   |> range(start: -%dm)
   |> filter(fn: (r) => r._measurement == "%s" and r._field == "%s")%s
-  |> last()''' % (config()["bucket"], int(within_minutes), MEASUREMENT, FIELD_SOC, _sys_filter())
+  |> last()''' % (config()["bucket"], int(within_minutes), measurement, field, _sys_filter())
     rows = _query(flux)
     if not rows:
         return None
@@ -335,6 +340,30 @@ def latestSocPercent(within_minutes=30):
         return float(rows[-1]["_value"])
     except (KeyError, ValueError):
         return None
+
+
+def latestSocPercent(within_minutes=30):
+    """Most recent state of charge in percent, or None if nothing recent enough.
+
+    The collector's cloud reading first, then the dispatcher's own Modbus reading of the same
+    inverter. The collector polls the AlphaESS cloud, and when that API went down (2026-09-29)
+    this returned None and the planner refused to plan - while the dispatcher was reading SoC
+    from the inverter every minute and publishing it as `dispatch_state.soc_pct` in the same
+    bucket. Without a plan the dispatcher falls back to self-consumption within two hours,
+    so a cloud outage cost every arbitrage it lasted for.
+
+    A fallback rather than "newest of the two": in normal running both are fresh and the cloud
+    reading is the one every backtest and report here was built on. Same freshness window for
+    both, so a dead dispatcher is not a stale answer either.
+    """
+    soc = _latestValue(MEASUREMENT, FIELD_SOC, within_minutes)
+    if soc is not None:
+        return soc
+    soc = _latestValue(DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC, within_minutes)
+    if soc is not None:
+        print("NOTE: no recent %s.%s - using the dispatcher's Modbus reading %s.%s"
+              % (MEASUREMENT, FIELD_SOC, DISPATCH_MEASUREMENT, DISPATCH_FIELD_SOC))
+    return soc
 
 
 def _rangeClause(start, stop):
